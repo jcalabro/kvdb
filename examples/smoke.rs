@@ -103,17 +103,18 @@ fn spawn_server(addr: &str) -> Child {
         .expect("failed to spawn kvdb server")
 }
 
-/// Poll until the server accepts TCP connections, or panic after 50 attempts.
-async fn wait_for_ready(addr: &str) {
-    for attempt in 1..=50 {
+/// Poll until the server accepts TCP connections.
+/// Returns Ok(()) on success, Err(message) if it times out after 5 seconds.
+async fn wait_for_ready(addr: &str) -> Result<(), String> {
+    for _ in 0..50 {
         if tokio::net::TcpStream::connect(addr).await.is_ok() {
-            return;
-        }
-        if attempt == 50 {
-            panic!("server did not become ready at {addr} after 5 seconds");
+            return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    Err(format!(
+        "server at {addr} did not become ready within 5 seconds"
+    ))
 }
 
 // ===========================================================================
@@ -1043,8 +1044,17 @@ async fn main() -> ExitCode {
         let port = find_free_port();
         args.addr = format!("127.0.0.1:{port}");
         eprintln!("spawning kvdb on {}", args.addr);
-        child = Some(spawn_server(&args.addr));
-        wait_for_ready(&args.addr).await;
+        let server = spawn_server(&args.addr);
+        child = Some(server);
+
+        if let Err(e) = wait_for_ready(&args.addr).await {
+            eprintln!("{e}");
+            if let Some(mut c) = child {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+            return ExitCode::FAILURE;
+        }
     }
 
     // Phase 1: Validate
