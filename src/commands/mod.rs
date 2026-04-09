@@ -58,6 +58,17 @@ pub async fn dispatch(cmd: &RedisCommand, state: &mut ConnectionState) -> Comman
         b"SETEX" => CommandResponse::Reply(strings::handle_setex(&cmd.args, state).await),
         b"PSETEX" => CommandResponse::Reply(strings::handle_psetex(&cmd.args, state).await),
         b"GETDEL" => CommandResponse::Reply(strings::handle_getdel(&cmd.args, state).await),
+        b"MGET" => CommandResponse::Reply(strings::handle_mget(&cmd.args, state).await),
+        b"MSET" => CommandResponse::Reply(strings::handle_mset(&cmd.args, state).await),
+        b"INCR" => CommandResponse::Reply(strings::handle_incr(&cmd.args, state).await),
+        b"DECR" => CommandResponse::Reply(strings::handle_decr(&cmd.args, state).await),
+        b"INCRBY" => CommandResponse::Reply(strings::handle_incrby(&cmd.args, state).await),
+        b"DECRBY" => CommandResponse::Reply(strings::handle_decrby(&cmd.args, state).await),
+        b"INCRBYFLOAT" => CommandResponse::Reply(strings::handle_incrbyfloat(&cmd.args, state).await),
+        b"APPEND" => CommandResponse::Reply(strings::handle_append(&cmd.args, state).await),
+        b"STRLEN" => CommandResponse::Reply(strings::handle_strlen(&cmd.args, state).await),
+        b"GETRANGE" => CommandResponse::Reply(strings::handle_getrange(&cmd.args, state).await),
+        b"SETRANGE" => CommandResponse::Reply(strings::handle_setrange(&cmd.args, state).await),
         _ => {
             let name_str = sanitize_for_error(&cmd.name);
             let mut msg = format!("ERR unknown command '{name_str}', with args beginning with:");

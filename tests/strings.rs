@@ -536,3 +536,529 @@ async fn large_value_chunking() {
     let result: String = redis::cmd("GET").arg("bigkey").query_async(&mut con).await.unwrap();
     assert_eq!(result, large_value);
 }
+
+// ---------------------------------------------------------------------------
+// MGET / MSET tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn mset_and_mget_roundtrip() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: () = redis::cmd("MSET")
+        .arg("a")
+        .arg("1")
+        .arg("b")
+        .arg("2")
+        .arg("c")
+        .arg("3")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let result: Vec<Option<String>> = redis::cmd("MGET")
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(
+        result,
+        vec![Some("1".to_string()), Some("2".to_string()), Some("3".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn mget_returns_nil_for_missing() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: () = redis::cmd("SET")
+        .arg("existing")
+        .arg("val")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let result: Vec<Option<String>> = redis::cmd("MGET")
+        .arg("existing")
+        .arg("missing")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(result, vec![Some("val".to_string()), None]);
+}
+
+#[tokio::test]
+async fn mset_overwrites_existing() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: () = redis::cmd("SET")
+        .arg("k")
+        .arg("old")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let _: () = redis::cmd("MSET")
+        .arg("k")
+        .arg("new")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let val: String = redis::cmd("GET").arg("k").query_async(&mut con).await.unwrap();
+    assert_eq!(val, "new");
+}
+
+#[tokio::test]
+async fn mset_odd_args_returns_error() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let result: redis::RedisResult<()> = redis::cmd("MSET")
+        .arg("a")
+        .arg("1")
+        .arg("b")
+        .query_async(&mut con)
+        .await;
+    assert!(result.is_err(), "MSET with odd args should error");
+}
+
+// ---------------------------------------------------------------------------
+// INCR / DECR tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn incr_creates_key_from_zero() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let val: i64 = redis::cmd("INCR").arg("counter").query_async(&mut con).await.unwrap();
+    assert_eq!(val, 1);
+}
+
+#[tokio::test]
+async fn incr_increments_existing() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: () = redis::cmd("SET")
+        .arg("k")
+        .arg("10")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let val: i64 = redis::cmd("INCR").arg("k").query_async(&mut con).await.unwrap();
+    assert_eq!(val, 11);
+}
+
+#[tokio::test]
+async fn incr_returns_error_on_non_integer() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: () = redis::cmd("SET")
+        .arg("k")
+        .arg("notnum")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let result: redis::RedisResult<i64> = redis::cmd("INCR").arg("k").query_async(&mut con).await;
+    assert!(result.is_err(), "INCR on non-integer should error");
+}
+
+#[tokio::test]
+async fn incr_returns_error_on_float_string() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: () = redis::cmd("SET")
+        .arg("k")
+        .arg("3.14")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let result: redis::RedisResult<i64> = redis::cmd("INCR").arg("k").query_async(&mut con).await;
+    assert!(result.is_err(), "INCR on float string should error");
+}
+
+#[tokio::test]
+async fn incr_overflow_returns_error() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: () = redis::cmd("SET")
+        .arg("k")
+        .arg("9223372036854775807")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let result: redis::RedisResult<i64> = redis::cmd("INCR").arg("k").query_async(&mut con).await;
+    assert!(result.is_err(), "INCR on i64::MAX should error");
+}
+
+#[tokio::test]
+async fn decr_underflow_returns_error() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: () = redis::cmd("SET")
+        .arg("k")
+        .arg("-9223372036854775808")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let result: redis::RedisResult<i64> = redis::cmd("DECR").arg("k").query_async(&mut con).await;
+    assert!(result.is_err(), "DECR on i64::MIN should error");
+}
+
+#[tokio::test]
+async fn decrby_with_large_delta() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: () = redis::cmd("SET").arg("k").arg("0").query_async(&mut con).await.unwrap();
+
+    let val: i64 = redis::cmd("DECRBY")
+        .arg("k")
+        .arg("1000000")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(val, -1_000_000);
+}
+
+#[tokio::test]
+async fn incrby_preserves_ttl() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: () = redis::cmd("SET")
+        .arg("k")
+        .arg("0")
+        .arg("EX")
+        .arg("100")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let val: i64 = redis::cmd("INCRBY")
+        .arg("k")
+        .arg("5")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(val, 5);
+
+    // Key should still exist (TTL preserved).
+    let result: Option<String> = redis::cmd("GET").arg("k").query_async(&mut con).await.unwrap();
+    assert_eq!(result, Some("5".to_string()));
+}
+
+// ---------------------------------------------------------------------------
+// INCRBYFLOAT tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn incrbyfloat_basic() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let val: String = redis::cmd("INCRBYFLOAT")
+        .arg("k")
+        .arg("3.14")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(val, "3.14");
+}
+
+#[tokio::test]
+async fn incrbyfloat_on_integer_string() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: () = redis::cmd("SET")
+        .arg("k")
+        .arg("10")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let val: String = redis::cmd("INCRBYFLOAT")
+        .arg("k")
+        .arg("0.5")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(val, "10.5");
+}
+
+#[tokio::test]
+async fn incrbyfloat_integer_result() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: String = redis::cmd("INCRBYFLOAT")
+        .arg("k")
+        .arg("3.14")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let val: String = redis::cmd("INCRBYFLOAT")
+        .arg("k")
+        .arg("0.86")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(val, "4");
+}
+
+#[tokio::test]
+async fn incrbyfloat_nan_returns_error() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let result: redis::RedisResult<String> = redis::cmd("INCRBYFLOAT")
+        .arg("k")
+        .arg("NaN")
+        .query_async(&mut con)
+        .await;
+    assert!(result.is_err(), "INCRBYFLOAT NaN should error");
+}
+
+#[tokio::test]
+async fn incrbyfloat_inf_returns_error() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let result: redis::RedisResult<String> = redis::cmd("INCRBYFLOAT")
+        .arg("k")
+        .arg("inf")
+        .query_async(&mut con)
+        .await;
+    assert!(result.is_err(), "INCRBYFLOAT inf should error");
+}
+
+// ---------------------------------------------------------------------------
+// APPEND / STRLEN tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn append_to_existing() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: () = redis::cmd("SET")
+        .arg("k")
+        .arg("hello")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let len: i64 = redis::cmd("APPEND")
+        .arg("k")
+        .arg(" world")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(len, 11);
+
+    let val: String = redis::cmd("GET").arg("k").query_async(&mut con).await.unwrap();
+    assert_eq!(val, "hello world");
+}
+
+#[tokio::test]
+async fn append_creates_key() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let len: i64 = redis::cmd("APPEND")
+        .arg("k")
+        .arg("val")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(len, 3);
+
+    let val: String = redis::cmd("GET").arg("k").query_async(&mut con).await.unwrap();
+    assert_eq!(val, "val");
+}
+
+#[tokio::test]
+async fn strlen_returns_length() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: () = redis::cmd("SET")
+        .arg("k")
+        .arg("hello")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let len: i64 = redis::cmd("STRLEN").arg("k").query_async(&mut con).await.unwrap();
+    assert_eq!(len, 5);
+}
+
+#[tokio::test]
+async fn strlen_nonexistent_returns_zero() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let len: i64 = redis::cmd("STRLEN").arg("missing").query_async(&mut con).await.unwrap();
+    assert_eq!(len, 0);
+}
+
+// ---------------------------------------------------------------------------
+// GETRANGE / SETRANGE tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn getrange_basic() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: () = redis::cmd("SET")
+        .arg("k")
+        .arg("Hello World")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let val: String = redis::cmd("GETRANGE")
+        .arg("k")
+        .arg("0")
+        .arg("4")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(val, "Hello");
+}
+
+#[tokio::test]
+async fn getrange_with_negative_indices() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: () = redis::cmd("SET")
+        .arg("k")
+        .arg("Hello World")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let val: String = redis::cmd("GETRANGE")
+        .arg("k")
+        .arg("-5")
+        .arg("-1")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(val, "World");
+}
+
+#[tokio::test]
+async fn getrange_start_greater_than_end() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: () = redis::cmd("SET")
+        .arg("k")
+        .arg("Hello World")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let val: String = redis::cmd("GETRANGE")
+        .arg("k")
+        .arg("5")
+        .arg("2")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(val, "");
+}
+
+#[tokio::test]
+async fn getrange_nonexistent_returns_empty() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let val: String = redis::cmd("GETRANGE")
+        .arg("missing")
+        .arg("0")
+        .arg("-1")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(val, "");
+}
+
+#[tokio::test]
+async fn setrange_basic() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: () = redis::cmd("SET")
+        .arg("k")
+        .arg("Hello World")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let len: i64 = redis::cmd("SETRANGE")
+        .arg("k")
+        .arg("6")
+        .arg("Redis")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(len, 11);
+
+    let val: String = redis::cmd("GET").arg("k").query_async(&mut con).await.unwrap();
+    assert_eq!(val, "Hello Redis");
+}
+
+#[tokio::test]
+async fn setrange_pads_with_zeros() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let len: i64 = redis::cmd("SETRANGE")
+        .arg("k")
+        .arg("5")
+        .arg("!")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(len, 6);
+
+    // First 5 bytes should be zero-padding, 6th byte is '!'.
+    let val: Vec<u8> = redis::cmd("GET").arg("k").query_async(&mut con).await.unwrap();
+    assert_eq!(val, vec![0, 0, 0, 0, 0, b'!']);
+}
+
+#[tokio::test]
+async fn setrange_negative_offset_returns_error() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let result: redis::RedisResult<i64> = redis::cmd("SETRANGE")
+        .arg("k")
+        .arg("-1")
+        .arg("x")
+        .query_async(&mut con)
+        .await;
+    assert!(result.is_err(), "SETRANGE with negative offset should error");
+}

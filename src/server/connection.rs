@@ -188,6 +188,17 @@ fn metric_label_for_command(name: &[u8]) -> &'static str {
         b"SETEX" => "SETEX",
         b"PSETEX" => "PSETEX",
         b"GETDEL" => "GETDEL",
+        b"MGET" => "MGET",
+        b"MSET" => "MSET",
+        b"INCR" => "INCR",
+        b"DECR" => "DECR",
+        b"INCRBY" => "INCRBY",
+        b"DECRBY" => "DECRBY",
+        b"INCRBYFLOAT" => "INCRBYFLOAT",
+        b"APPEND" => "APPEND",
+        b"STRLEN" => "STRLEN",
+        b"GETRANGE" => "GETRANGE",
+        b"SETRANGE" => "SETRANGE",
         _ => "UNKNOWN",
     }
 }

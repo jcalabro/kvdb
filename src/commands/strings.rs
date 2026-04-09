@@ -1,4 +1,6 @@
-//! String command handlers: GET, SET, DEL, EXISTS, SETNX, SETEX, PSETEX, GETDEL.
+//! String command handlers: GET, SET, DEL, EXISTS, SETNX, SETEX, PSETEX, GETDEL,
+//! MGET, MSET, INCR, DECR, INCRBY, DECRBY, INCRBYFLOAT, APPEND, STRLEN,
+//! GETRANGE, SETRANGE.
 //!
 //! Each handler validates arguments, runs an FDB transaction via
 //! `run_transact`, and returns a `RespValue` response.
@@ -500,6 +502,603 @@ pub async fn handle_getdel(args: &[Bytes], state: &ConnectionState) -> RespValue
     {
         Ok(Some(data)) => RespValue::BulkString(Some(Bytes::from(data))),
         Ok(None) => RespValue::BulkString(None),
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MGET key [key ...]
+// ---------------------------------------------------------------------------
+
+pub async fn handle_mget(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.is_empty() {
+        return RespValue::err(CommandError::WrongArity { name: "MGET".into() }.to_string());
+    }
+
+    let keys: Vec<Vec<u8>> = args.iter().map(|a| a.to_vec()).collect();
+
+    match run_transact(&state.db, "MGET", |tr| {
+        let dirs = state.dirs.clone();
+        let ks = keys.clone();
+        async move {
+            let now = helpers::now_ms();
+            let mut results: Vec<Option<Vec<u8>>> = Vec::with_capacity(ks.len());
+
+            for k in &ks {
+                // MGET returns nil for non-string keys (no WRONGTYPE error).
+                let meta = ObjectMeta::read(&tr, &dirs, k, now, false)
+                    .await
+                    .map_err(helpers::storage_err)?;
+
+                match meta {
+                    Some(m) if m.key_type == KeyType::String => {
+                        let data =
+                            crate::storage::chunking::read_chunks(&tr, &dirs.obj, k, m.num_chunks, m.size_bytes, false)
+                                .await
+                                .map_err(helpers::storage_err)?;
+                        results.push(Some(data));
+                    }
+                    _ => {
+                        results.push(None);
+                    }
+                }
+            }
+            Ok(results)
+        }
+    })
+    .await
+    {
+        Ok(results) => {
+            let arr: Vec<RespValue> = results
+                .into_iter()
+                .map(|opt| match opt {
+                    Some(data) => RespValue::BulkString(Some(Bytes::from(data))),
+                    None => RespValue::BulkString(None),
+                })
+                .collect();
+            RespValue::Array(Some(arr))
+        }
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MSET key value [key value ...]
+// ---------------------------------------------------------------------------
+
+pub async fn handle_mset(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.len() < 2 || !args.len().is_multiple_of(2) {
+        return RespValue::err(CommandError::WrongArity { name: "MSET".into() }.to_string());
+    }
+
+    let pairs: Vec<(Vec<u8>, Vec<u8>)> = args
+        .chunks(2)
+        .map(|chunk| (chunk[0].to_vec(), chunk[1].to_vec()))
+        .collect();
+
+    match run_transact(&state.db, "MSET", |tr| {
+        let dirs = state.dirs.clone();
+        let ps = pairs.clone();
+        async move {
+            for (k, v) in &ps {
+                let raw_meta = ObjectMeta::read(&tr, &dirs, k, 0, false)
+                    .await
+                    .map_err(helpers::storage_err)?;
+
+                helpers::write_string(&tr, &dirs, k, v, 0, raw_meta.as_ref()).map_err(helpers::cmd_err)?;
+            }
+            Ok(())
+        }
+    })
+    .await
+    {
+        Ok(()) => RespValue::ok(),
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// INCR / DECR / INCRBY / DECRBY — shared helper
+// ---------------------------------------------------------------------------
+
+/// Parse a byte slice as an i64.
+fn parse_i64_arg(arg: &Bytes) -> Result<i64, RespValue> {
+    let s = std::str::from_utf8(arg).map_err(|_| RespValue::err("ERR value is not an integer or out of range"))?;
+    s.parse::<i64>()
+        .map_err(|_| RespValue::err("ERR value is not an integer or out of range"))
+}
+
+/// Shared implementation for INCR, DECR, INCRBY, DECRBY.
+///
+/// Reads the current value (defaulting to "0" if the key does not exist),
+/// adds `delta`, writes back as a decimal string, and returns the new value.
+/// Preserves existing TTL.
+async fn incr_by_impl(key: Vec<u8>, delta: i64, state: &ConnectionState, cmd_name: &str) -> RespValue {
+    match run_transact(&state.db, cmd_name, |tr| {
+        let dirs = state.dirs.clone();
+        let k = key.clone();
+        async move {
+            let now = helpers::now_ms();
+
+            // Read existing meta (pass now_ms for expiry check).
+            let meta = ObjectMeta::read(&tr, &dirs, &k, now, false)
+                .await
+                .map_err(helpers::storage_err)?;
+
+            let (current_bytes, expires_at_ms) = match &meta {
+                Some(m) => {
+                    if m.key_type != KeyType::String {
+                        return Err(helpers::cmd_err(CommandError::WrongType));
+                    }
+                    let data =
+                        crate::storage::chunking::read_chunks(&tr, &dirs.obj, &k, m.num_chunks, m.size_bytes, false)
+                            .await
+                            .map_err(helpers::storage_err)?;
+                    (data, m.expires_at_ms)
+                }
+                None => (b"0".to_vec(), 0u64),
+            };
+
+            let current_str = std::str::from_utf8(&current_bytes).map_err(|_| {
+                helpers::cmd_err(CommandError::Generic("value is not an integer or out of range".into()))
+            })?;
+
+            let current_val: i64 = current_str.parse().map_err(|_| {
+                helpers::cmd_err(CommandError::Generic("value is not an integer or out of range".into()))
+            })?;
+
+            let new_val = current_val.checked_add(delta).ok_or_else(|| {
+                helpers::cmd_err(CommandError::Generic("increment or decrement would overflow".into()))
+            })?;
+
+            // Format using itoa for speed.
+            let mut buf = itoa::Buffer::new();
+            let new_str = buf.format(new_val);
+
+            // Read raw meta (pass now_ms=0 to see expired keys) so write_string
+            // can properly clean up old data.
+            let raw_meta = ObjectMeta::read(&tr, &dirs, &k, 0, false)
+                .await
+                .map_err(helpers::storage_err)?;
+
+            helpers::write_string(&tr, &dirs, &k, new_str.as_bytes(), expires_at_ms, raw_meta.as_ref())
+                .map_err(helpers::cmd_err)?;
+
+            Ok(new_val)
+        }
+    })
+    .await
+    {
+        Ok(val) => RespValue::Integer(val),
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// INCR key
+// ---------------------------------------------------------------------------
+
+pub async fn handle_incr(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.len() != 1 {
+        return RespValue::err(CommandError::WrongArity { name: "INCR".into() }.to_string());
+    }
+    let key = args[0].to_vec();
+    incr_by_impl(key, 1, state, "INCR").await
+}
+
+// ---------------------------------------------------------------------------
+// DECR key
+// ---------------------------------------------------------------------------
+
+pub async fn handle_decr(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.len() != 1 {
+        return RespValue::err(CommandError::WrongArity { name: "DECR".into() }.to_string());
+    }
+    let key = args[0].to_vec();
+    incr_by_impl(key, -1, state, "DECR").await
+}
+
+// ---------------------------------------------------------------------------
+// INCRBY key increment
+// ---------------------------------------------------------------------------
+
+pub async fn handle_incrby(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.len() != 2 {
+        return RespValue::err(CommandError::WrongArity { name: "INCRBY".into() }.to_string());
+    }
+    let key = args[0].to_vec();
+    let delta = match parse_i64_arg(&args[1]) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    incr_by_impl(key, delta, state, "INCRBY").await
+}
+
+// ---------------------------------------------------------------------------
+// DECRBY key decrement
+// ---------------------------------------------------------------------------
+
+pub async fn handle_decrby(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.len() != 2 {
+        return RespValue::err(CommandError::WrongArity { name: "DECRBY".into() }.to_string());
+    }
+    let key = args[0].to_vec();
+    let delta = match parse_i64_arg(&args[1]) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    // DECRBY key N == INCRBY key -N
+    let neg_delta = match delta.checked_neg() {
+        Some(v) => v,
+        None => {
+            return RespValue::err("ERR increment or decrement would overflow");
+        }
+    };
+    incr_by_impl(key, neg_delta, state, "DECRBY").await
+}
+
+// ---------------------------------------------------------------------------
+// INCRBYFLOAT key increment
+// ---------------------------------------------------------------------------
+
+/// Format a float following Redis INCRBYFLOAT rules:
+/// - If the result is an exact integer, format without decimal point.
+/// - Otherwise, use minimal precision and strip trailing zeros.
+fn format_redis_float(val: f64) -> String {
+    if val.fract() == 0.0 && val.is_finite() {
+        // Integer result — format without decimal.
+        format!("{}", val as i64)
+    } else {
+        // Use ryu for fast float-to-string, then strip trailing zeros.
+        let s = format!("{}", val);
+        // The default Display for f64 should give minimal precision.
+        // But we need to strip trailing zeros after the decimal point.
+        if let Some(dot_pos) = s.find('.') {
+            let trimmed = s.trim_end_matches('0');
+            if trimmed.ends_with('.') {
+                // All zeros after decimal — remove the dot too.
+                trimmed[..dot_pos].to_string()
+            } else {
+                trimmed.to_string()
+            }
+        } else {
+            s
+        }
+    }
+}
+
+pub async fn handle_incrbyfloat(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.len() != 2 {
+        return RespValue::err(
+            CommandError::WrongArity {
+                name: "INCRBYFLOAT".into(),
+            }
+            .to_string(),
+        );
+    }
+
+    let key = args[0].to_vec();
+    let incr_str = match std::str::from_utf8(&args[1]) {
+        Ok(s) => s.to_owned(),
+        Err(_) => {
+            return RespValue::err("ERR value is not a valid float");
+        }
+    };
+
+    let increment: f64 = match incr_str.parse() {
+        Ok(v) => v,
+        Err(_) => {
+            return RespValue::err("ERR value is not a valid float");
+        }
+    };
+
+    if increment.is_nan() || increment.is_infinite() {
+        return RespValue::err("ERR increment would produce NaN or Infinity");
+    }
+
+    match run_transact(&state.db, "INCRBYFLOAT", |tr| {
+        let dirs = state.dirs.clone();
+        let k = key.clone();
+        let inc = increment;
+        async move {
+            let now = helpers::now_ms();
+
+            let meta = ObjectMeta::read(&tr, &dirs, &k, now, false)
+                .await
+                .map_err(helpers::storage_err)?;
+
+            let (current_bytes, expires_at_ms) = match &meta {
+                Some(m) => {
+                    if m.key_type != KeyType::String {
+                        return Err(helpers::cmd_err(CommandError::WrongType));
+                    }
+                    let data =
+                        crate::storage::chunking::read_chunks(&tr, &dirs.obj, &k, m.num_chunks, m.size_bytes, false)
+                            .await
+                            .map_err(helpers::storage_err)?;
+                    (data, m.expires_at_ms)
+                }
+                None => (b"0".to_vec(), 0u64),
+            };
+
+            let current_str = std::str::from_utf8(&current_bytes)
+                .map_err(|_| helpers::cmd_err(CommandError::Generic("value is not a valid float".into())))?;
+
+            let current_val: f64 = current_str
+                .parse()
+                .map_err(|_| helpers::cmd_err(CommandError::Generic("value is not a valid float".into())))?;
+
+            let result = current_val + inc;
+            if result.is_nan() || result.is_infinite() {
+                return Err(helpers::cmd_err(CommandError::Generic(
+                    "increment would produce NaN or Infinity".into(),
+                )));
+            }
+
+            let formatted = format_redis_float(result);
+
+            let raw_meta = ObjectMeta::read(&tr, &dirs, &k, 0, false)
+                .await
+                .map_err(helpers::storage_err)?;
+
+            helpers::write_string(&tr, &dirs, &k, formatted.as_bytes(), expires_at_ms, raw_meta.as_ref())
+                .map_err(helpers::cmd_err)?;
+
+            Ok(formatted)
+        }
+    })
+    .await
+    {
+        Ok(s) => RespValue::BulkString(Some(Bytes::from(s))),
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// APPEND key value
+// ---------------------------------------------------------------------------
+
+pub async fn handle_append(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.len() != 2 {
+        return RespValue::err(CommandError::WrongArity { name: "APPEND".into() }.to_string());
+    }
+
+    let key = args[0].to_vec();
+    let append_val = args[1].to_vec();
+
+    match run_transact(&state.db, "APPEND", |tr| {
+        let dirs = state.dirs.clone();
+        let k = key.clone();
+        let av = append_val.clone();
+        async move {
+            let now = helpers::now_ms();
+
+            let meta = ObjectMeta::read(&tr, &dirs, &k, now, false)
+                .await
+                .map_err(helpers::storage_err)?;
+
+            let (mut current, expires_at_ms) = match &meta {
+                Some(m) => {
+                    if m.key_type != KeyType::String {
+                        return Err(helpers::cmd_err(CommandError::WrongType));
+                    }
+                    let data =
+                        crate::storage::chunking::read_chunks(&tr, &dirs.obj, &k, m.num_chunks, m.size_bytes, false)
+                            .await
+                            .map_err(helpers::storage_err)?;
+                    (data, m.expires_at_ms)
+                }
+                None => (Vec::new(), 0u64),
+            };
+
+            current.extend_from_slice(&av);
+            let new_len = current.len() as i64;
+
+            let raw_meta = ObjectMeta::read(&tr, &dirs, &k, 0, false)
+                .await
+                .map_err(helpers::storage_err)?;
+
+            helpers::write_string(&tr, &dirs, &k, &current, expires_at_ms, raw_meta.as_ref())
+                .map_err(helpers::cmd_err)?;
+
+            Ok(new_len)
+        }
+    })
+    .await
+    {
+        Ok(len) => RespValue::Integer(len),
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// STRLEN key
+// ---------------------------------------------------------------------------
+
+pub async fn handle_strlen(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.len() != 1 {
+        return RespValue::err(CommandError::WrongArity { name: "STRLEN".into() }.to_string());
+    }
+
+    let key = args[0].to_vec();
+
+    match run_transact(&state.db, "STRLEN", |tr| {
+        let dirs = state.dirs.clone();
+        let k = key.clone();
+        async move {
+            let now = helpers::now_ms();
+            let meta = ObjectMeta::read(&tr, &dirs, &k, now, false)
+                .await
+                .map_err(helpers::storage_err)?;
+
+            match meta {
+                Some(m) => {
+                    if m.key_type != KeyType::String {
+                        return Err(helpers::cmd_err(CommandError::WrongType));
+                    }
+                    Ok(m.size_bytes as i64)
+                }
+                None => Ok(0i64),
+            }
+        }
+    })
+    .await
+    {
+        Ok(len) => RespValue::Integer(len),
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GETRANGE key start end
+// ---------------------------------------------------------------------------
+
+pub async fn handle_getrange(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.len() != 3 {
+        return RespValue::err(
+            CommandError::WrongArity {
+                name: "GETRANGE".into(),
+            }
+            .to_string(),
+        );
+    }
+
+    let key = args[0].to_vec();
+
+    let start = match parse_i64_arg(&args[1]) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    let end = match parse_i64_arg(&args[2]) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+
+    match run_transact(&state.db, "GETRANGE", |tr| {
+        let dirs = state.dirs.clone();
+        let k = key.clone();
+        async move {
+            let now = helpers::now_ms();
+            let data = helpers::get_string(&tr, &dirs, &k, now)
+                .await
+                .map_err(helpers::cmd_err)?;
+
+            let value = data.unwrap_or_default();
+            let len = value.len() as i64;
+
+            if len == 0 {
+                return Ok(Vec::new());
+            }
+
+            // Resolve negative indices.
+            let mut s = if start < 0 { len + start } else { start };
+            let mut e = if end < 0 { len + end } else { end };
+
+            // Clamp.
+            if s < 0 {
+                s = 0;
+            }
+            if e >= len {
+                e = len - 1;
+            }
+
+            if s > e || s >= len {
+                return Ok(Vec::new());
+            }
+
+            Ok(value[s as usize..=e as usize].to_vec())
+        }
+    })
+    .await
+    {
+        Ok(data) => RespValue::BulkString(Some(Bytes::from(data))),
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SETRANGE key offset value
+// ---------------------------------------------------------------------------
+
+pub async fn handle_setrange(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.len() != 3 {
+        return RespValue::err(
+            CommandError::WrongArity {
+                name: "SETRANGE".into(),
+            }
+            .to_string(),
+        );
+    }
+
+    let key = args[0].to_vec();
+
+    let offset = match parse_i64_arg(&args[1]) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+
+    if offset < 0 {
+        return RespValue::err("ERR offset is out of range");
+    }
+    let offset = offset as usize;
+
+    let patch = args[2].to_vec();
+
+    // Check 512MB limit.
+    if offset + patch.len() > 536_870_912 {
+        return RespValue::err("ERR string exceeds maximum allowed size");
+    }
+
+    match run_transact(&state.db, "SETRANGE", |tr| {
+        let dirs = state.dirs.clone();
+        let k = key.clone();
+        let p = patch.clone();
+        let off = offset;
+        async move {
+            let now = helpers::now_ms();
+
+            let meta = ObjectMeta::read(&tr, &dirs, &k, now, false)
+                .await
+                .map_err(helpers::storage_err)?;
+
+            let (mut current, expires_at_ms) = match &meta {
+                Some(m) => {
+                    if m.key_type != KeyType::String {
+                        return Err(helpers::cmd_err(CommandError::WrongType));
+                    }
+                    let data =
+                        crate::storage::chunking::read_chunks(&tr, &dirs.obj, &k, m.num_chunks, m.size_bytes, false)
+                            .await
+                            .map_err(helpers::storage_err)?;
+                    (data, m.expires_at_ms)
+                }
+                None => (Vec::new(), 0u64),
+            };
+
+            // Zero-pad if offset > current length.
+            let required_len = off + p.len();
+            if required_len > current.len() {
+                current.resize(required_len, 0u8);
+            }
+
+            // Overwrite bytes at [offset..offset+patch.len()].
+            current[off..off + p.len()].copy_from_slice(&p);
+
+            let new_len = current.len() as i64;
+
+            let raw_meta = ObjectMeta::read(&tr, &dirs, &k, 0, false)
+                .await
+                .map_err(helpers::storage_err)?;
+
+            helpers::write_string(&tr, &dirs, &k, &current, expires_at_ms, raw_meta.as_ref())
+                .map_err(helpers::cmd_err)?;
+
+            Ok(new_len)
+        }
+    })
+    .await
+    {
+        Ok(len) => RespValue::Integer(len),
         Err(e) => helpers::storage_err_to_resp(e),
     }
 }
