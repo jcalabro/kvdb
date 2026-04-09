@@ -526,6 +526,644 @@ async fn run_validate(addr: &str) -> bool {
         .await;
     t.check_err("SETRANGE negative offset", result);
 
+    // -- SET flags (success paths) ------------------------------------------
+    println!("SET flags");
+
+    // SET with EX: set a key with a 60-second TTL
+    let result: redis::RedisResult<String> = redis::cmd("SET")
+        .arg("ttl-key")
+        .arg("expires-soon")
+        .arg("EX")
+        .arg("60")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("SET ttl-key EX 60", result, "OK".to_string());
+
+    let result: redis::RedisResult<String> = redis::cmd("GET").arg("ttl-key").query_async(&mut con).await;
+    t.check_eq("GET ttl-key after SET EX", result, "expires-soon".to_string());
+
+    // SET with PX: set a key with a 60000ms TTL
+    let result: redis::RedisResult<String> = redis::cmd("SET")
+        .arg("px-key")
+        .arg("px-value")
+        .arg("PX")
+        .arg("60000")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("SET px-key PX 60000", result, "OK".to_string());
+
+    // SET with GET: returns old value
+    let _: redis::RedisResult<String> = redis::cmd("SET")
+        .arg("get-flag-key")
+        .arg("old-value")
+        .query_async(&mut con)
+        .await;
+    let result: redis::RedisResult<String> = redis::cmd("SET")
+        .arg("get-flag-key")
+        .arg("new-value")
+        .arg("GET")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("SET GET returns old value", result, "old-value".to_string());
+
+    let result: redis::RedisResult<String> = redis::cmd("GET").arg("get-flag-key").query_async(&mut con).await;
+    t.check_eq("GET after SET GET", result, "new-value".to_string());
+
+    // SET NX on new key succeeds
+    let _: redis::RedisResult<i64> = redis::cmd("DEL").arg("nx-test").query_async(&mut con).await;
+    let result: redis::RedisResult<String> = redis::cmd("SET")
+        .arg("nx-test")
+        .arg("first")
+        .arg("NX")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("SET NX on new key", result, "OK".to_string());
+
+    // SET XX on existing key succeeds
+    let result: redis::RedisResult<String> = redis::cmd("SET")
+        .arg("nx-test")
+        .arg("updated")
+        .arg("XX")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("SET XX on existing key", result, "OK".to_string());
+
+    let result: redis::RedisResult<String> = redis::cmd("GET").arg("nx-test").query_async(&mut con).await;
+    t.check_eq("GET after SET XX", result, "updated".to_string());
+
+    // SET with KEEPTTL preserves existing TTL
+    let _: redis::RedisResult<String> = redis::cmd("SET")
+        .arg("keepttl-key")
+        .arg("v1")
+        .arg("EX")
+        .arg("300")
+        .query_async(&mut con)
+        .await;
+    let result: redis::RedisResult<String> = redis::cmd("SET")
+        .arg("keepttl-key")
+        .arg("v2")
+        .arg("KEEPTTL")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("SET KEEPTTL", result, "OK".to_string());
+
+    let result: redis::RedisResult<i64> = redis::cmd("TTL").arg("keepttl-key").query_async(&mut con).await;
+    match result {
+        Ok(ttl) if ttl > 0 => t.pass("TTL preserved after SET KEEPTTL"),
+        Ok(ttl) => t.fail("TTL preserved after SET KEEPTTL", &format!("expected >0, got {ttl}")),
+        Err(e) => t.fail("TTL preserved after SET KEEPTTL", &format!("error: {e}")),
+    }
+
+    // cleanup SET flags keys
+    let _: redis::RedisResult<i64> = redis::cmd("DEL")
+        .arg("ttl-key")
+        .arg("px-key")
+        .arg("get-flag-key")
+        .arg("nx-test")
+        .arg("keepttl-key")
+        .query_async(&mut con)
+        .await;
+
+    // -- SETEX / PSETEX -----------------------------------------------------
+    println!("SETEX / PSETEX");
+
+    let result: redis::RedisResult<String> = redis::cmd("SETEX")
+        .arg("setex-key")
+        .arg("120")
+        .arg("setex-val")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("SETEX setex-key 120", result, "OK".to_string());
+
+    let result: redis::RedisResult<String> = redis::cmd("GET").arg("setex-key").query_async(&mut con).await;
+    t.check_eq("GET setex-key", result, "setex-val".to_string());
+
+    let result: redis::RedisResult<i64> = redis::cmd("TTL").arg("setex-key").query_async(&mut con).await;
+    match result {
+        Ok(ttl) if ttl > 0 && ttl <= 120 => t.pass("TTL setex-key in range"),
+        Ok(ttl) => t.fail("TTL setex-key in range", &format!("expected 1..=120, got {ttl}")),
+        Err(e) => t.fail("TTL setex-key in range", &format!("error: {e}")),
+    }
+
+    let result: redis::RedisResult<String> = redis::cmd("PSETEX")
+        .arg("psetex-key")
+        .arg("120000")
+        .arg("psetex-val")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("PSETEX psetex-key 120000", result, "OK".to_string());
+
+    let result: redis::RedisResult<String> = redis::cmd("GET").arg("psetex-key").query_async(&mut con).await;
+    t.check_eq("GET psetex-key", result, "psetex-val".to_string());
+
+    let result: redis::RedisResult<i64> = redis::cmd("PTTL").arg("psetex-key").query_async(&mut con).await;
+    match result {
+        Ok(pttl) if pttl > 0 && pttl <= 120_000 => t.pass("PTTL psetex-key in range"),
+        Ok(pttl) => t.fail("PTTL psetex-key in range", &format!("expected 1..=120000, got {pttl}")),
+        Err(e) => t.fail("PTTL psetex-key in range", &format!("error: {e}")),
+    }
+
+    // SETEX error cases
+    let result: redis::RedisResult<String> = redis::cmd("SETEX")
+        .arg("k")
+        .arg("0")
+        .arg("v")
+        .query_async(&mut con)
+        .await;
+    t.check_err("SETEX zero seconds", result);
+
+    let result: redis::RedisResult<String> = redis::cmd("SETEX")
+        .arg("k")
+        .arg("-5")
+        .arg("v")
+        .query_async(&mut con)
+        .await;
+    t.check_err("SETEX negative seconds", result);
+
+    let result: redis::RedisResult<String> = redis::cmd("SETEX").arg("k").arg("v").query_async(&mut con).await;
+    t.check_err("SETEX wrong arity (2 args)", result);
+
+    let result: redis::RedisResult<String> = redis::cmd("PSETEX")
+        .arg("k")
+        .arg("0")
+        .arg("v")
+        .query_async(&mut con)
+        .await;
+    t.check_err("PSETEX zero ms", result);
+
+    // cleanup
+    let _: redis::RedisResult<i64> = redis::cmd("DEL")
+        .arg("setex-key")
+        .arg("psetex-key")
+        .query_async(&mut con)
+        .await;
+
+    // -- TTL / PTTL ---------------------------------------------------------
+    println!("TTL / PTTL");
+
+    // TTL on nonexistent key returns -2
+    let result: redis::RedisResult<i64> = redis::cmd("TTL").arg("no-such-key").query_async(&mut con).await;
+    t.check_eq("TTL nonexistent returns -2", result, -2);
+
+    // Set a key with no TTL, TTL returns -1
+    let _: redis::RedisResult<String> = redis::cmd("SET")
+        .arg("no-ttl-key")
+        .arg("val")
+        .query_async(&mut con)
+        .await;
+    let result: redis::RedisResult<i64> = redis::cmd("TTL").arg("no-ttl-key").query_async(&mut con).await;
+    t.check_eq("TTL no-expiry returns -1", result, -1);
+
+    // Set a key with EX, TTL returns positive value
+    let _: redis::RedisResult<String> = redis::cmd("SET")
+        .arg("ttl-check")
+        .arg("val")
+        .arg("EX")
+        .arg("300")
+        .query_async(&mut con)
+        .await;
+    let result: redis::RedisResult<i64> = redis::cmd("TTL").arg("ttl-check").query_async(&mut con).await;
+    match result {
+        Ok(ttl) if ttl > 0 && ttl <= 300 => t.pass("TTL returns positive seconds"),
+        Ok(ttl) => t.fail("TTL returns positive seconds", &format!("expected 1..=300, got {ttl}")),
+        Err(e) => t.fail("TTL returns positive seconds", &format!("error: {e}")),
+    }
+
+    // PTTL on nonexistent returns -2
+    let result: redis::RedisResult<i64> = redis::cmd("PTTL").arg("no-such-key").query_async(&mut con).await;
+    t.check_eq("PTTL nonexistent returns -2", result, -2);
+
+    // PTTL on key with no expiry returns -1
+    let result: redis::RedisResult<i64> = redis::cmd("PTTL").arg("no-ttl-key").query_async(&mut con).await;
+    t.check_eq("PTTL no-expiry returns -1", result, -1);
+
+    // PTTL on key with TTL returns positive ms
+    let result: redis::RedisResult<i64> = redis::cmd("PTTL").arg("ttl-check").query_async(&mut con).await;
+    match result {
+        Ok(pttl) if pttl > 0 && pttl <= 300_000 => t.pass("PTTL returns positive ms"),
+        Ok(pttl) => t.fail("PTTL returns positive ms", &format!("expected 1..=300000, got {pttl}")),
+        Err(e) => t.fail("PTTL returns positive ms", &format!("error: {e}")),
+    }
+
+    // TTL error: wrong arity
+    let result: redis::RedisResult<i64> = redis::cmd("TTL").query_async(&mut con).await;
+    t.check_err("TTL wrong arity (0 args)", result);
+
+    let result: redis::RedisResult<i64> = redis::cmd("PTTL").query_async(&mut con).await;
+    t.check_err("PTTL wrong arity (0 args)", result);
+
+    // -- EXPIRE / PEXPIRE ---------------------------------------------------
+    println!("EXPIRE / PEXPIRE");
+
+    // EXPIRE on existing key returns 1
+    let result: redis::RedisResult<i64> = redis::cmd("EXPIRE")
+        .arg("no-ttl-key")
+        .arg("60")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("EXPIRE existing key returns 1", result, 1);
+
+    let result: redis::RedisResult<i64> = redis::cmd("TTL").arg("no-ttl-key").query_async(&mut con).await;
+    match result {
+        Ok(ttl) if ttl > 0 && ttl <= 60 => t.pass("TTL after EXPIRE in range"),
+        Ok(ttl) => t.fail("TTL after EXPIRE in range", &format!("expected 1..=60, got {ttl}")),
+        Err(e) => t.fail("TTL after EXPIRE in range", &format!("error: {e}")),
+    }
+
+    // EXPIRE on nonexistent key returns 0
+    let result: redis::RedisResult<i64> = redis::cmd("EXPIRE")
+        .arg("no-such-key")
+        .arg("60")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("EXPIRE nonexistent returns 0", result, 0);
+
+    // PEXPIRE sets TTL in ms
+    let result: redis::RedisResult<i64> = redis::cmd("PEXPIRE")
+        .arg("ttl-check")
+        .arg("60000")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("PEXPIRE existing key returns 1", result, 1);
+
+    // EXPIRE error cases
+    let result: redis::RedisResult<i64> = redis::cmd("EXPIRE")
+        .arg("no-ttl-key")
+        .arg("-5")
+        .query_async(&mut con)
+        .await;
+    t.check_err("EXPIRE negative seconds", result);
+
+    let result: redis::RedisResult<i64> = redis::cmd("EXPIRE")
+        .arg("no-ttl-key")
+        .arg("notanumber")
+        .query_async(&mut con)
+        .await;
+    t.check_err("EXPIRE non-integer", result);
+
+    let result: redis::RedisResult<i64> = redis::cmd("EXPIRE").query_async(&mut con).await;
+    t.check_err("EXPIRE wrong arity (0 args)", result);
+
+    // -- EXPIREAT / PEXPIREAT -----------------------------------------------
+    println!("EXPIREAT / PEXPIREAT");
+
+    // EXPIREAT with a future timestamp
+    let future_secs: u64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 300;
+    let result: redis::RedisResult<i64> = redis::cmd("EXPIREAT")
+        .arg("ttl-check")
+        .arg(future_secs)
+        .query_async(&mut con)
+        .await;
+    t.check_eq("EXPIREAT future timestamp returns 1", result, 1);
+
+    let result: redis::RedisResult<i64> = redis::cmd("EXPIRETIME").arg("ttl-check").query_async(&mut con).await;
+    match result {
+        Ok(ts) if ts > 0 => t.pass("EXPIRETIME returns positive timestamp"),
+        Ok(ts) => t.fail("EXPIRETIME returns positive timestamp", &format!("got {ts}")),
+        Err(e) => t.fail("EXPIRETIME returns positive timestamp", &format!("error: {e}")),
+    }
+
+    // PEXPIREAT with a future ms timestamp
+    let future_ms: u128 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        + 300_000;
+    let result: redis::RedisResult<i64> = redis::cmd("PEXPIREAT")
+        .arg("no-ttl-key")
+        .arg(future_ms as u64)
+        .query_async(&mut con)
+        .await;
+    t.check_eq("PEXPIREAT future timestamp returns 1", result, 1);
+
+    let result: redis::RedisResult<i64> = redis::cmd("PEXPIRETIME").arg("no-ttl-key").query_async(&mut con).await;
+    match result {
+        Ok(ts) if ts > 0 => t.pass("PEXPIRETIME returns positive timestamp"),
+        Ok(ts) => t.fail("PEXPIRETIME returns positive timestamp", &format!("got {ts}")),
+        Err(e) => t.fail("PEXPIRETIME returns positive timestamp", &format!("error: {e}")),
+    }
+
+    // EXPIREAT on nonexistent returns 0
+    let result: redis::RedisResult<i64> = redis::cmd("EXPIREAT")
+        .arg("no-such-key")
+        .arg(future_secs)
+        .query_async(&mut con)
+        .await;
+    t.check_eq("EXPIREAT nonexistent returns 0", result, 0);
+
+    // EXPIREAT negative timestamp is error
+    let result: redis::RedisResult<i64> = redis::cmd("EXPIREAT")
+        .arg("ttl-check")
+        .arg("-1")
+        .query_async(&mut con)
+        .await;
+    t.check_err("EXPIREAT negative timestamp", result);
+
+    // -- EXPIRETIME / PEXPIRETIME -------------------------------------------
+    println!("EXPIRETIME / PEXPIRETIME");
+
+    // EXPIRETIME on nonexistent returns -2
+    let result: redis::RedisResult<i64> = redis::cmd("EXPIRETIME").arg("no-such-key").query_async(&mut con).await;
+    t.check_eq("EXPIRETIME nonexistent returns -2", result, -2);
+
+    // PEXPIRETIME on nonexistent returns -2
+    let result: redis::RedisResult<i64> = redis::cmd("PEXPIRETIME").arg("no-such-key").query_async(&mut con).await;
+    t.check_eq("PEXPIRETIME nonexistent returns -2", result, -2);
+
+    // Set a key with no TTL, EXPIRETIME returns -1
+    let _: redis::RedisResult<String> = redis::cmd("SET")
+        .arg("no-ttl-key2")
+        .arg("val")
+        .query_async(&mut con)
+        .await;
+    let result: redis::RedisResult<i64> = redis::cmd("EXPIRETIME").arg("no-ttl-key2").query_async(&mut con).await;
+    t.check_eq("EXPIRETIME no-expiry returns -1", result, -1);
+
+    let result: redis::RedisResult<i64> = redis::cmd("PEXPIRETIME").arg("no-ttl-key2").query_async(&mut con).await;
+    t.check_eq("PEXPIRETIME no-expiry returns -1", result, -1);
+
+    // Wrong arity
+    let result: redis::RedisResult<i64> = redis::cmd("EXPIRETIME").query_async(&mut con).await;
+    t.check_err("EXPIRETIME wrong arity (0 args)", result);
+
+    let result: redis::RedisResult<i64> = redis::cmd("PEXPIRETIME").query_async(&mut con).await;
+    t.check_err("PEXPIRETIME wrong arity (0 args)", result);
+
+    let _: redis::RedisResult<i64> = redis::cmd("DEL").arg("no-ttl-key2").query_async(&mut con).await;
+
+    // -- PERSIST ------------------------------------------------------------
+    println!("PERSIST");
+
+    // PERSIST removes TTL, returns 1
+    let result: redis::RedisResult<i64> = redis::cmd("PERSIST").arg("ttl-check").query_async(&mut con).await;
+    t.check_eq("PERSIST key with TTL returns 1", result, 1);
+
+    let result: redis::RedisResult<i64> = redis::cmd("TTL").arg("ttl-check").query_async(&mut con).await;
+    t.check_eq("TTL after PERSIST returns -1", result, -1);
+
+    // PERSIST on key with no TTL returns 0
+    let result: redis::RedisResult<i64> = redis::cmd("PERSIST").arg("ttl-check").query_async(&mut con).await;
+    t.check_eq("PERSIST no-TTL returns 0", result, 0);
+
+    // PERSIST on nonexistent returns 0
+    let result: redis::RedisResult<i64> = redis::cmd("PERSIST").arg("no-such-key").query_async(&mut con).await;
+    t.check_eq("PERSIST nonexistent returns 0", result, 0);
+
+    // -- TYPE ---------------------------------------------------------------
+    println!("TYPE");
+
+    let result: redis::RedisResult<String> = redis::cmd("TYPE").arg("ttl-check").query_async(&mut con).await;
+    t.check_eq("TYPE string key", result, "string".to_string());
+
+    let result: redis::RedisResult<String> = redis::cmd("TYPE").arg("no-such-key").query_async(&mut con).await;
+    t.check_eq("TYPE nonexistent returns none", result, "none".to_string());
+
+    let result: redis::RedisResult<String> = redis::cmd("TYPE").query_async(&mut con).await;
+    t.check_err("TYPE wrong arity (0 args)", result);
+
+    // -- RENAME / RENAMENX --------------------------------------------------
+    println!("RENAME / RENAMENX");
+
+    // Set up key for rename
+    let _: redis::RedisResult<String> = redis::cmd("SET")
+        .arg("rename-src")
+        .arg("rename-val")
+        .arg("EX")
+        .arg("300")
+        .query_async(&mut con)
+        .await;
+
+    // RENAME moves key and preserves value
+    let result: redis::RedisResult<String> = redis::cmd("RENAME")
+        .arg("rename-src")
+        .arg("rename-dst")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("RENAME returns OK", result, "OK".to_string());
+
+    let result: redis::RedisResult<String> = redis::cmd("GET").arg("rename-dst").query_async(&mut con).await;
+    t.check_eq("GET rename-dst after RENAME", result, "rename-val".to_string());
+
+    let result: redis::RedisResult<i64> = redis::cmd("EXISTS").arg("rename-src").query_async(&mut con).await;
+    t.check_eq("rename-src gone after RENAME", result, 0);
+
+    // RENAME preserves TTL
+    let result: redis::RedisResult<i64> = redis::cmd("TTL").arg("rename-dst").query_async(&mut con).await;
+    match result {
+        Ok(ttl) if ttl > 0 => t.pass("RENAME preserves TTL"),
+        Ok(ttl) => t.fail("RENAME preserves TTL", &format!("expected >0, got {ttl}")),
+        Err(e) => t.fail("RENAME preserves TTL", &format!("error: {e}")),
+    }
+
+    // RENAME nonexistent source returns error
+    let result: redis::RedisResult<String> = redis::cmd("RENAME")
+        .arg("no-such-key")
+        .arg("dst")
+        .query_async(&mut con)
+        .await;
+    t.check_err("RENAME nonexistent source", result);
+
+    // RENAME wrong arity
+    let result: redis::RedisResult<String> = redis::cmd("RENAME").arg("only-one").query_async(&mut con).await;
+    t.check_err("RENAME wrong arity (1 arg)", result);
+
+    // RENAMENX succeeds when dst missing
+    let _: redis::RedisResult<String> = redis::cmd("SET")
+        .arg("rnx-src")
+        .arg("rnx-val")
+        .query_async(&mut con)
+        .await;
+    let _: redis::RedisResult<i64> = redis::cmd("DEL").arg("rnx-dst").query_async(&mut con).await;
+    let result: redis::RedisResult<i64> = redis::cmd("RENAMENX")
+        .arg("rnx-src")
+        .arg("rnx-dst")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("RENAMENX dst missing returns 1", result, 1);
+
+    let result: redis::RedisResult<String> = redis::cmd("GET").arg("rnx-dst").query_async(&mut con).await;
+    t.check_eq("GET rnx-dst after RENAMENX", result, "rnx-val".to_string());
+
+    // RENAMENX fails when dst exists
+    let _: redis::RedisResult<String> = redis::cmd("SET")
+        .arg("rnx-src2")
+        .arg("val2")
+        .query_async(&mut con)
+        .await;
+    let result: redis::RedisResult<i64> = redis::cmd("RENAMENX")
+        .arg("rnx-src2")
+        .arg("rnx-dst")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("RENAMENX dst exists returns 0", result, 0);
+
+    // cleanup rename keys
+    let _: redis::RedisResult<i64> = redis::cmd("DEL")
+        .arg("rename-dst")
+        .arg("rnx-dst")
+        .arg("rnx-src2")
+        .query_async(&mut con)
+        .await;
+
+    // -- UNLINK / TOUCH -----------------------------------------------------
+    println!("UNLINK / TOUCH");
+
+    let _: redis::RedisResult<String> = redis::cmd("MSET")
+        .arg("ul1")
+        .arg("v1")
+        .arg("ul2")
+        .arg("v2")
+        .arg("ul3")
+        .arg("v3")
+        .query_async(&mut con)
+        .await;
+
+    // UNLINK deletes keys, returns count
+    let result: redis::RedisResult<i64> = redis::cmd("UNLINK")
+        .arg("ul1")
+        .arg("ul2")
+        .arg("ul-nonexistent")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("UNLINK returns deleted count", result, 2);
+
+    // TOUCH returns count of existing keys
+    let result: redis::RedisResult<i64> = redis::cmd("TOUCH")
+        .arg("ul3")
+        .arg("ul-nonexistent")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("TOUCH returns existing count", result, 1);
+
+    // UNLINK wrong arity
+    let result: redis::RedisResult<i64> = redis::cmd("UNLINK").query_async(&mut con).await;
+    t.check_err("UNLINK wrong arity (0 args)", result);
+
+    // TOUCH wrong arity
+    let result: redis::RedisResult<i64> = redis::cmd("TOUCH").query_async(&mut con).await;
+    t.check_err("TOUCH wrong arity (0 args)", result);
+
+    let _: redis::RedisResult<i64> = redis::cmd("DEL").arg("ul3").query_async(&mut con).await;
+
+    // -- DBSIZE -------------------------------------------------------------
+    println!("DBSIZE");
+
+    // Switch to a clean database for DBSIZE testing
+    let result: redis::RedisResult<String> = redis::cmd("SELECT").arg("15").query_async(&mut con).await;
+    t.check_eq("SELECT 15", result, "OK".to_string());
+
+    let _: redis::RedisResult<String> = redis::cmd("FLUSHDB").query_async(&mut con).await;
+
+    let result: redis::RedisResult<i64> = redis::cmd("DBSIZE").query_async(&mut con).await;
+    t.check_eq("DBSIZE empty db", result, 0);
+
+    let _: redis::RedisResult<String> = redis::cmd("MSET")
+        .arg("db-a")
+        .arg("1")
+        .arg("db-b")
+        .arg("2")
+        .arg("db-c")
+        .arg("3")
+        .query_async(&mut con)
+        .await;
+
+    let result: redis::RedisResult<i64> = redis::cmd("DBSIZE").query_async(&mut con).await;
+    t.check_eq("DBSIZE after 3 keys", result, 3);
+
+    let result: redis::RedisResult<i64> = redis::cmd("DBSIZE").arg("extra").query_async(&mut con).await;
+    t.check_err("DBSIZE wrong arity (1 arg)", result);
+
+    // cleanup: flush and return to db 0
+    let _: redis::RedisResult<String> = redis::cmd("FLUSHDB").query_async(&mut con).await;
+    let _: redis::RedisResult<String> = redis::cmd("SELECT").arg("0").query_async(&mut con).await;
+
+    // -- SELECT -------------------------------------------------------------
+    println!("SELECT");
+
+    // Write in db 0, select db 1, verify key absent, return to db 0
+    let _: redis::RedisResult<String> = redis::cmd("SET")
+        .arg("select-test")
+        .arg("in-db0")
+        .query_async(&mut con)
+        .await;
+
+    let result: redis::RedisResult<String> = redis::cmd("SELECT").arg("1").query_async(&mut con).await;
+    t.check_eq("SELECT 1", result, "OK".to_string());
+
+    let result: redis::RedisResult<Option<String>> = redis::cmd("GET").arg("select-test").query_async(&mut con).await;
+    t.check_eq("GET select-test in db 1 is nil", result, None);
+
+    let result: redis::RedisResult<String> = redis::cmd("SELECT").arg("0").query_async(&mut con).await;
+    t.check_eq("SELECT 0", result, "OK".to_string());
+
+    let result: redis::RedisResult<String> = redis::cmd("GET").arg("select-test").query_async(&mut con).await;
+    t.check_eq("GET select-test back in db 0", result, "in-db0".to_string());
+
+    // SELECT error cases
+    let result: redis::RedisResult<String> = redis::cmd("SELECT").arg("16").query_async(&mut con).await;
+    t.check_err("SELECT out of range (16)", result);
+
+    let result: redis::RedisResult<String> = redis::cmd("SELECT").arg("-1").query_async(&mut con).await;
+    t.check_err("SELECT negative", result);
+
+    let result: redis::RedisResult<String> = redis::cmd("SELECT").arg("notanumber").query_async(&mut con).await;
+    t.check_err("SELECT non-integer", result);
+
+    let _: redis::RedisResult<i64> = redis::cmd("DEL").arg("select-test").query_async(&mut con).await;
+
+    // -- FLUSHDB / FLUSHALL -------------------------------------------------
+    println!("FLUSHDB / FLUSHALL");
+
+    // FLUSHDB clears current db only
+    let result: redis::RedisResult<String> = redis::cmd("SELECT").arg("14").query_async(&mut con).await;
+    t.check_eq("SELECT 14 for FLUSHDB test", result, "OK".to_string());
+
+    let _: redis::RedisResult<String> = redis::cmd("SET")
+        .arg("flush-key")
+        .arg("flush-val")
+        .query_async(&mut con)
+        .await;
+
+    let result: redis::RedisResult<String> = redis::cmd("FLUSHDB").query_async(&mut con).await;
+    t.check_eq("FLUSHDB returns OK", result, "OK".to_string());
+
+    let result: redis::RedisResult<i64> = redis::cmd("DBSIZE").query_async(&mut con).await;
+    t.check_eq("DBSIZE after FLUSHDB", result, 0);
+
+    // FLUSHALL clears all dbs: set keys in db 13 and 14, flushall, verify both empty
+    let _: redis::RedisResult<String> = redis::cmd("SELECT").arg("13").query_async(&mut con).await;
+    let _: redis::RedisResult<String> = redis::cmd("SET").arg("fa-key-13").arg("v").query_async(&mut con).await;
+    let _: redis::RedisResult<String> = redis::cmd("SELECT").arg("14").query_async(&mut con).await;
+    let _: redis::RedisResult<String> = redis::cmd("SET").arg("fa-key-14").arg("v").query_async(&mut con).await;
+
+    let result: redis::RedisResult<String> = redis::cmd("FLUSHALL").query_async(&mut con).await;
+    t.check_eq("FLUSHALL returns OK", result, "OK".to_string());
+
+    let result: redis::RedisResult<i64> = redis::cmd("DBSIZE").query_async(&mut con).await;
+    t.check_eq("DBSIZE db 14 after FLUSHALL", result, 0);
+
+    let _: redis::RedisResult<String> = redis::cmd("SELECT").arg("13").query_async(&mut con).await;
+    let result: redis::RedisResult<i64> = redis::cmd("DBSIZE").query_async(&mut con).await;
+    t.check_eq("DBSIZE db 13 after FLUSHALL", result, 0);
+
+    // Return to db 0
+    let _: redis::RedisResult<String> = redis::cmd("SELECT").arg("0").query_async(&mut con).await;
+
+    // FLUSHDB wrong arity
+    let result: redis::RedisResult<String> = redis::cmd("FLUSHDB").arg("a").arg("b").query_async(&mut con).await;
+    t.check_err("FLUSHDB wrong arity (2 args)", result);
+
+    // cleanup TTL test keys still in db 0
+    let _: redis::RedisResult<i64> = redis::cmd("DEL")
+        .arg("ttl-check")
+        .arg("no-ttl-key")
+        .query_async(&mut con)
+        .await;
+
     // -- Post-error liveness check ------------------------------------------
     let result: redis::RedisResult<String> = redis::cmd("PING").query_async(&mut con).await;
     t.check_eq("server alive after errors", result, "PONG".to_string());
