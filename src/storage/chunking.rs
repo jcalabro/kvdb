@@ -74,7 +74,7 @@ pub async fn read_chunks(
     expected_size: u64,
     snapshot: bool,
 ) -> Result<Vec<u8>, StorageError> {
-    let _span = debug_span!("read_chunks", key_len = key.len(), num_chunks).entered();
+    let _span = debug_span!("read_chunks", key_len = key.len(), num_chunks);
 
     if num_chunks == 0 {
         return Ok(Vec::new());

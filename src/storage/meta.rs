@@ -131,7 +131,9 @@ impl ObjectMeta {
         now_ms: u64,
         snapshot: bool,
     ) -> Result<Option<Self>, StorageError> {
-        let _span = trace_span!("meta_read").entered();
+        // Use Instrumented span pattern instead of _entered to avoid
+        // holding a non-Send EnteredSpan across the await point.
+        let _span = trace_span!("meta_read");
         directories::validate_key_size(key)?;
 
         let fdb_key = dirs.meta_key(key);

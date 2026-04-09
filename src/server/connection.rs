@@ -180,7 +180,14 @@ fn metric_label_for_command(name: &[u8]) -> &'static str {
         b"QUIT" => "QUIT",
         b"COMMAND" => "COMMAND",
         b"CLIENT" => "CLIENT",
-        // Future commands added here as they're implemented
+        b"GET" => "GET",
+        b"SET" => "SET",
+        b"DEL" => "DEL",
+        b"EXISTS" => "EXISTS",
+        b"SETNX" => "SETNX",
+        b"SETEX" => "SETEX",
+        b"PSETEX" => "PSETEX",
+        b"GETDEL" => "GETDEL",
         _ => "UNKNOWN",
     }
 }

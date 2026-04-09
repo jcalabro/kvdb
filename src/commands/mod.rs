@@ -5,6 +5,8 @@
 //! Each command returns a `CommandResponse` that tells the connection
 //! handler whether to continue or close the connection.
 
+pub mod strings;
+
 use bytes::Bytes;
 
 use crate::error::CommandError;
@@ -48,6 +50,14 @@ pub async fn dispatch(cmd: &RedisCommand, state: &mut ConnectionState) -> Comman
         b"QUIT" => CommandResponse::Close(RespValue::ok()),
         b"COMMAND" => CommandResponse::Reply(handle_command(&cmd.args)),
         b"CLIENT" => CommandResponse::Reply(handle_client(&cmd.args)),
+        b"GET" => CommandResponse::Reply(strings::handle_get(&cmd.args, state).await),
+        b"SET" => CommandResponse::Reply(strings::handle_set(&cmd.args, state).await),
+        b"DEL" => CommandResponse::Reply(strings::handle_del(&cmd.args, state).await),
+        b"EXISTS" => CommandResponse::Reply(strings::handle_exists(&cmd.args, state).await),
+        b"SETNX" => CommandResponse::Reply(strings::handle_setnx(&cmd.args, state).await),
+        b"SETEX" => CommandResponse::Reply(strings::handle_setex(&cmd.args, state).await),
+        b"PSETEX" => CommandResponse::Reply(strings::handle_psetex(&cmd.args, state).await),
+        b"GETDEL" => CommandResponse::Reply(strings::handle_getdel(&cmd.args, state).await),
         _ => {
             let name_str = sanitize_for_error(&cmd.name);
             let mut msg = format!("ERR unknown command '{name_str}', with args beginning with:");

@@ -68,9 +68,11 @@ pub fn write_string(
     expires_at_ms: u64,
     old_meta: Option<&ObjectMeta>,
 ) -> Result<(), CommandError> {
-    // If overwriting, clear old data chunks first.
-    if old_meta.is_some() {
-        delete_chunks(tr, &dirs.obj, key);
+    // If overwriting, clear old type-specific data first.
+    // This handles type changes (e.g. SET on a key that was previously a hash)
+    // by delegating to delete_data_for_meta which knows how to clean up each type.
+    if let Some(old) = old_meta {
+        delete_data_for_meta(tr, dirs, key, old);
     }
 
     let num_chunks = write_chunks(tr, &dirs.obj, key, data);
