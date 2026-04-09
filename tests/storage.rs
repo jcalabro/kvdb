@@ -1,7 +1,10 @@
 //! Integration tests for the FDB storage layer.
 //!
-//! Each test creates an isolated namespace using a UUID-based root prefix
-//! to avoid interference between concurrent test runs.
+//! Tests are grouped by component to minimize FDB directory setup
+//! overhead — each `#[tokio::test]` function runs in its own nextest
+//! process and pays ~50ms to open directories, so fewer functions =
+//! faster total runtime. Within each function, tests use unique keys
+//! to avoid interference.
 
 use std::collections::HashSet;
 
@@ -14,149 +17,95 @@ use kvdb::storage::directories::Directories;
 use kvdb::storage::meta::{KeyType, ObjectMeta};
 use kvdb::storage::run_transact;
 
-/// Test context that provides an isolated FDB namespace per test.
-///
-/// On drop, the entire directory tree for this test's root prefix is
-/// removed (best-effort).
-struct StorageTestContext {
-    db: Database,
-    dirs: Directories,
-    root_prefix: String,
-}
-
-impl StorageTestContext {
-    async fn new() -> Self {
-        let root_prefix = format!("kvdb_test_{}", Uuid::new_v4());
-        let db = Database::new("fdb.cluster").unwrap();
-        let dirs = Directories::open(&db, 0, &root_prefix).await.unwrap();
-        Self { db, dirs, root_prefix }
-    }
-}
-
-impl Drop for StorageTestContext {
-    fn drop(&mut self) {
-        let db = self.db.clone();
-        let root_prefix = self.root_prefix.clone();
-
-        // Async cleanup in a blocking thread — best-effort.
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            rt.block_on(async {
-                let trx = db.inner().create_trx().unwrap();
-                let dir_layer = DirectoryLayer::default();
-                let _ = dir_layer.remove(&trx, &[root_prefix]).await;
-                let _ = trx.commit().await;
-            });
-        });
-    }
-}
-
-// ─────────────────────────────────────────────────────────
-// ObjectMeta tests
-// ─────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn meta_write_read_roundtrip() {
-    let ctx = StorageTestContext::new().await;
-    let key = b"test_key";
-
-    let trx = ctx.db.inner().create_trx().unwrap();
-    let meta = ObjectMeta::new_string(1, 42);
-    meta.write(&trx, &ctx.dirs, key).unwrap();
-    trx.commit().await.unwrap();
-
-    let trx = ctx.db.inner().create_trx().unwrap();
-    let read_meta = ObjectMeta::read(&trx, &ctx.dirs, key, 0, false).await.unwrap();
-    assert_eq!(read_meta, Some(meta));
-}
-
-#[tokio::test]
-async fn meta_read_nonexistent_returns_none() {
-    let ctx = StorageTestContext::new().await;
-
-    let trx = ctx.db.inner().create_trx().unwrap();
-    let result = ObjectMeta::read(&trx, &ctx.dirs, b"no_such_key", 0, false)
+/// Open an isolated Database + Directories pair for a test.
+async fn setup() -> (Database, Directories, String) {
+    let db = Database::new("fdb.cluster").expect("failed to open FDB — is `just up` running?");
+    let root = format!("kvdb_test_{}", Uuid::new_v4());
+    let dirs = Directories::open(&db, 0, &root)
         .await
-        .unwrap();
-    assert_eq!(result, None);
+        .expect("failed to open directories");
+    (db, dirs, root)
 }
 
-#[tokio::test]
-async fn meta_lazy_expiry_returns_none() {
-    let ctx = StorageTestContext::new().await;
-    let key = b"expired_key";
-
-    // Write with expiry in the past.
-    let trx = ctx.db.inner().create_trx().unwrap();
-    let mut meta = ObjectMeta::new_string(1, 10);
-    meta.expires_at_ms = 1_000; // expired at 1 second
-    meta.write(&trx, &ctx.dirs, key).unwrap();
-    trx.commit().await.unwrap();
-
-    // Read with now_ms > expires_at_ms => lazy expiry returns None.
-    let trx = ctx.db.inner().create_trx().unwrap();
-    let result = ObjectMeta::read(&trx, &ctx.dirs, key, 2_000, false).await.unwrap();
-    assert_eq!(result, None);
+/// Best-effort cleanup of a test namespace.
+async fn cleanup(db: &Database, root: &str) {
+    let trx = db.inner().create_trx().unwrap();
+    let dir_layer = DirectoryLayer::default();
+    let _ = dir_layer.remove(&trx, &[root.to_string()]).await;
+    let _ = trx.commit().await;
 }
 
-#[tokio::test]
-async fn meta_non_expired_returns_some() {
-    let ctx = StorageTestContext::new().await;
-    let key = b"live_key";
+// ─────────────────────────────────────────────────────────
+// ObjectMeta: write, read, expiry, delete, all types
+// ─────────────────────────────────────────────────────────
 
-    let trx = ctx.db.inner().create_trx().unwrap();
-    let mut meta = ObjectMeta::new_string(1, 10);
-    meta.expires_at_ms = 100_000; // expires far in the future
-    meta.write(&trx, &ctx.dirs, key).unwrap();
+#[tokio::test]
+async fn meta_operations() {
+    let (db, dirs, root) = setup().await;
+
+    // write/read roundtrip
+    let trx = db.inner().create_trx().unwrap();
+    let meta = ObjectMeta::new_string(1, 42);
+    meta.write(&trx, &dirs, b"wr_key").unwrap();
     trx.commit().await.unwrap();
 
-    // Read with now_ms < expires_at_ms => key is still alive.
-    let trx = ctx.db.inner().create_trx().unwrap();
-    let result = ObjectMeta::read(&trx, &ctx.dirs, key, 50_000, false).await.unwrap();
-    assert!(result.is_some());
+    let trx = db.inner().create_trx().unwrap();
+    let result = ObjectMeta::read(&trx, &dirs, b"wr_key", 0, false).await.unwrap();
+    assert_eq!(result, Some(meta), "write/read roundtrip failed");
+
+    // read nonexistent returns None
+    let trx = db.inner().create_trx().unwrap();
+    let result = ObjectMeta::read(&trx, &dirs, b"no_such_key", 0, false).await.unwrap();
+    assert_eq!(result, None, "nonexistent key should return None");
+
+    // lazy expiry returns None for expired key
+    let trx = db.inner().create_trx().unwrap();
+    let mut expired = ObjectMeta::new_string(1, 10);
+    expired.expires_at_ms = 1_000;
+    expired.write(&trx, &dirs, b"exp_key").unwrap();
+    trx.commit().await.unwrap();
+
+    let trx = db.inner().create_trx().unwrap();
+    let result = ObjectMeta::read(&trx, &dirs, b"exp_key", 2_000, false).await.unwrap();
+    assert_eq!(result, None, "expired key should return None");
+
+    // non-expired key returns Some
+    let trx = db.inner().create_trx().unwrap();
+    let mut live = ObjectMeta::new_string(1, 10);
+    live.expires_at_ms = 100_000;
+    live.write(&trx, &dirs, b"live_key").unwrap();
+    trx.commit().await.unwrap();
+
+    let trx = db.inner().create_trx().unwrap();
+    let result = ObjectMeta::read(&trx, &dirs, b"live_key", 50_000, false).await.unwrap();
+    assert!(result.is_some(), "non-expired key should return Some");
     assert_eq!(result.unwrap().expires_at_ms, 100_000);
-}
 
-#[tokio::test]
-async fn meta_delete_removes_key() {
-    let ctx = StorageTestContext::new().await;
-    let key = b"delete_me";
-
-    // Write then delete.
-    let trx = ctx.db.inner().create_trx().unwrap();
-    let meta = ObjectMeta::new_string(1, 5);
-    meta.write(&trx, &ctx.dirs, key).unwrap();
+    // delete removes key
+    let trx = db.inner().create_trx().unwrap();
+    ObjectMeta::new_string(1, 5).write(&trx, &dirs, b"del_key").unwrap();
     trx.commit().await.unwrap();
 
-    let trx = ctx.db.inner().create_trx().unwrap();
-    ObjectMeta::delete(&trx, &ctx.dirs, key);
+    let trx = db.inner().create_trx().unwrap();
+    ObjectMeta::delete(&trx, &dirs, b"del_key");
     trx.commit().await.unwrap();
 
-    let trx = ctx.db.inner().create_trx().unwrap();
-    let result = ObjectMeta::read(&trx, &ctx.dirs, key, 0, false).await.unwrap();
-    assert_eq!(result, None);
-}
+    let trx = db.inner().create_trx().unwrap();
+    let result = ObjectMeta::read(&trx, &dirs, b"del_key", 0, false).await.unwrap();
+    assert_eq!(result, None, "deleted key should return None");
 
-#[tokio::test]
-async fn meta_all_key_types_roundtrip() {
-    let ctx = StorageTestContext::new().await;
-
-    let types = [
-        (KeyType::String, "string_key"),
-        (KeyType::Hash, "hash_key"),
-        (KeyType::Set, "set_key"),
-        (KeyType::SortedSet, "zset_key"),
-        (KeyType::List, "list_key"),
-        (KeyType::Stream, "stream_key"),
-    ];
-
-    for (key_type, key_name) in &types {
-        let trx = ctx.db.inner().create_trx().unwrap();
+    // all key types roundtrip
+    for (kt, key) in [
+        (KeyType::String, b"kt_str" as &[u8]),
+        (KeyType::Hash, b"kt_hash"),
+        (KeyType::Set, b"kt_set"),
+        (KeyType::SortedSet, b"kt_zset"),
+        (KeyType::List, b"kt_list"),
+        (KeyType::Stream, b"kt_stream"),
+    ] {
+        let trx = db.inner().create_trx().unwrap();
         let meta = ObjectMeta {
-            key_type: *key_type,
+            key_type: kt,
             num_chunks: 1,
             size_bytes: 100,
             expires_at_ms: 0,
@@ -166,289 +115,219 @@ async fn meta_all_key_types_roundtrip() {
             list_tail: 0,
             list_length: 0,
         };
-        meta.write(&trx, &ctx.dirs, key_name.as_bytes()).unwrap();
+        meta.write(&trx, &dirs, key).unwrap();
         trx.commit().await.unwrap();
 
-        let trx = ctx.db.inner().create_trx().unwrap();
-        let read_meta = ObjectMeta::read(&trx, &ctx.dirs, key_name.as_bytes(), 0, false)
+        let trx = db.inner().create_trx().unwrap();
+        let read = ObjectMeta::read(&trx, &dirs, key, 0, false)
             .await
             .unwrap()
-            .expect("key should exist");
-        assert_eq!(read_meta.key_type, *key_type);
-        assert_eq!(read_meta.cardinality, 42);
+            .unwrap_or_else(|| panic!("key type {kt:?} should exist"));
+        assert_eq!(read.key_type, kt, "key type mismatch for {kt:?}");
+        assert_eq!(read.cardinality, 42, "cardinality mismatch for {kt:?}");
     }
+
+    cleanup(&db, &root).await;
 }
 
 // ─────────────────────────────────────────────────────────
-// Chunking tests
+// Chunking: small, empty, large, boundaries, delete, overwrite
 // ─────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn chunking_small_value() {
-    let ctx = StorageTestContext::new().await;
-    let key = b"small";
-    let data = b"hello world";
+async fn chunk_operations() {
+    let (db, dirs, root) = setup().await;
 
-    let trx = ctx.db.inner().create_trx().unwrap();
-    let num_chunks = chunking::write_chunks(&trx, &ctx.dirs, key, data);
-    assert_eq!(num_chunks, 1);
+    // small value (< 1 chunk)
+    let trx = db.inner().create_trx().unwrap();
+    let nc = chunking::write_chunks(&trx, &dirs, b"c_small", b"hello world");
+    assert_eq!(nc, 1);
     trx.commit().await.unwrap();
 
-    let trx = ctx.db.inner().create_trx().unwrap();
-    let result = chunking::read_chunks(&trx, &ctx.dirs, key, 1, false).await.unwrap();
-    assert_eq!(result, data);
-}
+    let trx = db.inner().create_trx().unwrap();
+    let result = chunking::read_chunks(&trx, &dirs, b"c_small", 1, false).await.unwrap();
+    assert_eq!(result, b"hello world", "small value mismatch");
 
-#[tokio::test]
-async fn chunking_empty_value() {
-    let ctx = StorageTestContext::new().await;
-    let key = b"empty";
-    let data = b"";
-
-    let trx = ctx.db.inner().create_trx().unwrap();
-    let num_chunks = chunking::write_chunks(&trx, &ctx.dirs, key, data);
-    assert_eq!(num_chunks, 0);
+    // empty value
+    let trx = db.inner().create_trx().unwrap();
+    let nc = chunking::write_chunks(&trx, &dirs, b"c_empty", b"");
+    assert_eq!(nc, 0);
     trx.commit().await.unwrap();
 
-    let trx = ctx.db.inner().create_trx().unwrap();
-    let result = chunking::read_chunks(&trx, &ctx.dirs, key, 0, false).await.unwrap();
-    assert!(result.is_empty());
-}
+    let trx = db.inner().create_trx().unwrap();
+    let result = chunking::read_chunks(&trx, &dirs, b"c_empty", 0, false).await.unwrap();
+    assert!(result.is_empty(), "empty value should be empty");
 
-#[tokio::test]
-async fn chunking_large_value_500kb() {
-    let ctx = StorageTestContext::new().await;
-    let key = b"large";
-    let data = vec![0xABu8; 500_000]; // 500KB = 5 chunks
-
-    let trx = ctx.db.inner().create_trx().unwrap();
-    let num_chunks = chunking::write_chunks(&trx, &ctx.dirs, key, &data);
-    assert_eq!(num_chunks, 5);
+    // large value (500KB = 5 chunks)
+    let big = vec![0xABu8; 500_000];
+    let trx = db.inner().create_trx().unwrap();
+    let nc = chunking::write_chunks(&trx, &dirs, b"c_big", &big);
+    assert_eq!(nc, 5);
     trx.commit().await.unwrap();
 
-    let trx = ctx.db.inner().create_trx().unwrap();
-    let result = chunking::read_chunks(&trx, &ctx.dirs, key, 5, false).await.unwrap();
-    assert_eq!(result.len(), 500_000);
-    assert_eq!(result, data);
-}
+    let trx = db.inner().create_trx().unwrap();
+    let result = chunking::read_chunks(&trx, &dirs, b"c_big", 5, false).await.unwrap();
+    assert_eq!(result, big, "500KB value mismatch");
 
-#[tokio::test]
-async fn chunking_exact_boundary() {
-    let ctx = StorageTestContext::new().await;
-    let key = b"boundary";
-    let data = vec![0x42u8; CHUNK_SIZE]; // exactly 100,000 bytes = 1 chunk
-
-    let trx = ctx.db.inner().create_trx().unwrap();
-    let num_chunks = chunking::write_chunks(&trx, &ctx.dirs, key, &data);
-    assert_eq!(num_chunks, 1);
+    // exact chunk boundary (100,000 bytes)
+    let exact = vec![0x42u8; CHUNK_SIZE];
+    let trx = db.inner().create_trx().unwrap();
+    let nc = chunking::write_chunks(&trx, &dirs, b"c_exact", &exact);
+    assert_eq!(nc, 1);
     trx.commit().await.unwrap();
 
-    let trx = ctx.db.inner().create_trx().unwrap();
-    let result = chunking::read_chunks(&trx, &ctx.dirs, key, 1, false).await.unwrap();
-    assert_eq!(result.len(), CHUNK_SIZE);
-    assert_eq!(result, data);
-}
+    let trx = db.inner().create_trx().unwrap();
+    let result = chunking::read_chunks(&trx, &dirs, b"c_exact", 1, false).await.unwrap();
+    assert_eq!(result, exact, "exact boundary mismatch");
 
-#[tokio::test]
-async fn chunking_boundary_plus_one() {
-    let ctx = StorageTestContext::new().await;
-    let key = b"boundary_plus";
-    let data = vec![0x77u8; CHUNK_SIZE + 1]; // 100,001 bytes = 2 chunks
-
-    let trx = ctx.db.inner().create_trx().unwrap();
-    let num_chunks = chunking::write_chunks(&trx, &ctx.dirs, key, &data);
-    assert_eq!(num_chunks, 2);
+    // boundary + 1 (100,001 bytes = 2 chunks)
+    let bplus = vec![0x77u8; CHUNK_SIZE + 1];
+    let trx = db.inner().create_trx().unwrap();
+    let nc = chunking::write_chunks(&trx, &dirs, b"c_bplus", &bplus);
+    assert_eq!(nc, 2);
     trx.commit().await.unwrap();
 
-    let trx = ctx.db.inner().create_trx().unwrap();
-    let result = chunking::read_chunks(&trx, &ctx.dirs, key, 2, false).await.unwrap();
-    assert_eq!(result.len(), CHUNK_SIZE + 1);
-    assert_eq!(result, data);
-}
+    let trx = db.inner().create_trx().unwrap();
+    let result = chunking::read_chunks(&trx, &dirs, b"c_bplus", 2, false).await.unwrap();
+    assert_eq!(result, bplus, "boundary+1 mismatch");
 
-#[tokio::test]
-async fn chunking_delete_removes_all_chunks() {
-    let ctx = StorageTestContext::new().await;
-    let key = b"to_delete";
-    let data = vec![0xFFu8; CHUNK_SIZE * 3]; // 3 chunks
-
-    // Write 3 chunks.
-    let trx = ctx.db.inner().create_trx().unwrap();
-    let num_chunks = chunking::write_chunks(&trx, &ctx.dirs, key, &data);
-    assert_eq!(num_chunks, 3);
+    // delete removes all chunks
+    let del_data = vec![0xFFu8; CHUNK_SIZE * 3];
+    let trx = db.inner().create_trx().unwrap();
+    chunking::write_chunks(&trx, &dirs, b"c_del", &del_data);
     trx.commit().await.unwrap();
 
-    // Delete all chunks.
-    let trx = ctx.db.inner().create_trx().unwrap();
-    chunking::delete_chunks(&trx, &ctx.dirs, key);
+    let trx = db.inner().create_trx().unwrap();
+    chunking::delete_chunks(&trx, &dirs, b"c_del");
     trx.commit().await.unwrap();
 
-    // Reading should fail with DataCorruption (missing chunk 0).
-    let trx = ctx.db.inner().create_trx().unwrap();
-    let result = chunking::read_chunks(&trx, &ctx.dirs, key, 3, false).await;
-    assert!(result.is_err());
-}
+    let trx = db.inner().create_trx().unwrap();
+    assert!(
+        chunking::read_chunks(&trx, &dirs, b"c_del", 3, false).await.is_err(),
+        "reading deleted chunks should fail"
+    );
 
-#[tokio::test]
-async fn chunking_overwrite_different_size() {
-    let ctx = StorageTestContext::new().await;
-    let key = b"overwrite";
-
-    // Write 3 chunks.
-    let data_big = vec![0xAAu8; CHUNK_SIZE * 3];
-    let trx = ctx.db.inner().create_trx().unwrap();
-    let num_chunks = chunking::write_chunks(&trx, &ctx.dirs, key, &data_big);
-    assert_eq!(num_chunks, 3);
+    // overwrite with different size (3 chunks → 1 chunk)
+    let trx = db.inner().create_trx().unwrap();
+    chunking::write_chunks(&trx, &dirs, b"c_over", &vec![0xAAu8; CHUNK_SIZE * 3]);
     trx.commit().await.unwrap();
 
-    // Overwrite with 1 chunk and delete old chunks first.
-    let data_small = vec![0xBBu8; 50];
-    let trx = ctx.db.inner().create_trx().unwrap();
-    chunking::delete_chunks(&trx, &ctx.dirs, key);
-    let num_chunks = chunking::write_chunks(&trx, &ctx.dirs, key, &data_small);
-    assert_eq!(num_chunks, 1);
+    let small = vec![0xBBu8; 50];
+    let trx = db.inner().create_trx().unwrap();
+    chunking::delete_chunks(&trx, &dirs, b"c_over");
+    chunking::write_chunks(&trx, &dirs, b"c_over", &small);
     trx.commit().await.unwrap();
 
-    // Read back — should get the small value.
-    let trx = ctx.db.inner().create_trx().unwrap();
-    let result = chunking::read_chunks(&trx, &ctx.dirs, key, 1, false).await.unwrap();
-    assert_eq!(result, data_small);
+    let trx = db.inner().create_trx().unwrap();
+    let result = chunking::read_chunks(&trx, &dirs, b"c_over", 1, false).await.unwrap();
+    assert_eq!(result, small, "overwrite mismatch");
+
+    cleanup(&db, &root).await;
 }
 
 // ─────────────────────────────────────────────────────────
-// Directory tests
+// Directories: prefixes non-empty, distinct, idempotent,
+// namespace isolation
 // ─────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn directories_all_subspaces_have_non_empty_prefixes() {
-    let ctx = StorageTestContext::new().await;
+async fn directory_properties() {
+    let db = Database::new("fdb.cluster").unwrap();
+    let root = format!("kvdb_test_{}", Uuid::new_v4());
 
-    let prefixes = [
-        ctx.dirs.meta.bytes(),
-        ctx.dirs.obj.bytes(),
-        ctx.dirs.hash.bytes(),
-        ctx.dirs.set.bytes(),
-        ctx.dirs.zset.bytes(),
-        ctx.dirs.zset_idx.bytes(),
-        ctx.dirs.list.bytes(),
-        ctx.dirs.expire.bytes(),
-    ];
+    let dirs = Directories::open(&db, 0, &root).await.unwrap();
 
-    for (i, prefix) in prefixes.iter().enumerate() {
-        assert!(!prefix.is_empty(), "subspace {i} has empty prefix");
+    // all 8 subspaces have non-empty prefixes
+    for prefix in [
+        dirs.meta.bytes(),
+        dirs.obj.bytes(),
+        dirs.hash.bytes(),
+        dirs.set.bytes(),
+        dirs.zset.bytes(),
+        dirs.zset_idx.bytes(),
+        dirs.list.bytes(),
+        dirs.expire.bytes(),
+    ] {
+        assert!(!prefix.is_empty(), "subspace has empty prefix");
     }
-}
 
-#[tokio::test]
-async fn directories_all_subspace_prefixes_distinct() {
-    let ctx = StorageTestContext::new().await;
-
+    // all 8 are distinct
     let prefixes: Vec<Vec<u8>> = vec![
-        ctx.dirs.meta.bytes().to_vec(),
-        ctx.dirs.obj.bytes().to_vec(),
-        ctx.dirs.hash.bytes().to_vec(),
-        ctx.dirs.set.bytes().to_vec(),
-        ctx.dirs.zset.bytes().to_vec(),
-        ctx.dirs.zset_idx.bytes().to_vec(),
-        ctx.dirs.list.bytes().to_vec(),
-        ctx.dirs.expire.bytes().to_vec(),
+        dirs.meta.bytes().to_vec(),
+        dirs.obj.bytes().to_vec(),
+        dirs.hash.bytes().to_vec(),
+        dirs.set.bytes().to_vec(),
+        dirs.zset.bytes().to_vec(),
+        dirs.zset_idx.bytes().to_vec(),
+        dirs.list.bytes().to_vec(),
+        dirs.expire.bytes().to_vec(),
     ];
-
     let unique: HashSet<&Vec<u8>> = prefixes.iter().collect();
-    assert_eq!(unique.len(), 8, "expected 8 distinct prefixes, got {}", unique.len());
-}
+    assert_eq!(unique.len(), 8, "subspace prefixes not all distinct");
 
-#[tokio::test]
-async fn directories_reopen_same_namespace_same_prefixes() {
-    let root_prefix = format!("kvdb_test_{}", Uuid::new_v4());
-    let db = Database::new("fdb.cluster").unwrap();
+    // reopening returns the same prefixes (idempotent)
+    let dirs2 = Directories::open(&db, 0, &root).await.unwrap();
+    assert_eq!(dirs.meta.bytes(), dirs2.meta.bytes(), "meta prefix changed on reopen");
+    assert_eq!(dirs.obj.bytes(), dirs2.obj.bytes(), "obj prefix changed on reopen");
+    assert_eq!(dirs.hash.bytes(), dirs2.hash.bytes(), "hash prefix changed on reopen");
 
-    let dirs1 = Directories::open(&db, 0, &root_prefix).await.unwrap();
-    let dirs2 = Directories::open(&db, 0, &root_prefix).await.unwrap();
+    // different namespace → different prefixes
+    let dirs_ns1 = Directories::open(&db, 1, &root).await.unwrap();
+    assert_ne!(
+        dirs.meta.bytes(),
+        dirs_ns1.meta.bytes(),
+        "ns0 and ns1 meta should differ"
+    );
+    assert_ne!(dirs.obj.bytes(), dirs_ns1.obj.bytes(), "ns0 and ns1 obj should differ");
 
-    assert_eq!(dirs1.meta.bytes(), dirs2.meta.bytes());
-    assert_eq!(dirs1.obj.bytes(), dirs2.obj.bytes());
-    assert_eq!(dirs1.hash.bytes(), dirs2.hash.bytes());
-    assert_eq!(dirs1.set.bytes(), dirs2.set.bytes());
-    assert_eq!(dirs1.zset.bytes(), dirs2.zset.bytes());
-    assert_eq!(dirs1.zset_idx.bytes(), dirs2.zset_idx.bytes());
-    assert_eq!(dirs1.list.bytes(), dirs2.list.bytes());
-    assert_eq!(dirs1.expire.bytes(), dirs2.expire.bytes());
-
-    // Cleanup.
+    // cleanup
     let trx = db.inner().create_trx().unwrap();
     let dir_layer = DirectoryLayer::default();
-    let _ = dir_layer.remove(&trx, &[root_prefix]).await;
-    let _ = trx.commit().await;
-}
-
-#[tokio::test]
-async fn directories_different_namespaces_different_prefixes() {
-    let root_prefix = format!("kvdb_test_{}", Uuid::new_v4());
-    let db = Database::new("fdb.cluster").unwrap();
-
-    let dirs_ns0 = Directories::open(&db, 0, &root_prefix).await.unwrap();
-    let dirs_ns1 = Directories::open(&db, 1, &root_prefix).await.unwrap();
-
-    // Every subspace prefix in ns0 should differ from the corresponding one in ns1.
-    assert_ne!(dirs_ns0.meta.bytes(), dirs_ns1.meta.bytes());
-    assert_ne!(dirs_ns0.obj.bytes(), dirs_ns1.obj.bytes());
-    assert_ne!(dirs_ns0.hash.bytes(), dirs_ns1.hash.bytes());
-    assert_ne!(dirs_ns0.set.bytes(), dirs_ns1.set.bytes());
-    assert_ne!(dirs_ns0.zset.bytes(), dirs_ns1.zset.bytes());
-    assert_ne!(dirs_ns0.zset_idx.bytes(), dirs_ns1.zset_idx.bytes());
-    assert_ne!(dirs_ns0.list.bytes(), dirs_ns1.list.bytes());
-    assert_ne!(dirs_ns0.expire.bytes(), dirs_ns1.expire.bytes());
-
-    // Cleanup.
-    let trx = db.inner().create_trx().unwrap();
-    let dir_layer = DirectoryLayer::default();
-    let _ = dir_layer.remove(&trx, &[root_prefix]).await;
+    let _ = dir_layer.remove(&trx, &[root]).await;
     let _ = trx.commit().await;
 }
 
 // ─────────────────────────────────────────────────────────
-// Transaction wrapper test
+// Transaction wrapper: write + read via run_transact
 // ─────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn run_transact_write_then_read() {
-    let ctx = StorageTestContext::new().await;
-    let key = b"transact_key";
-    let data = b"transact_value";
+    let (db, dirs, root) = setup().await;
+    let key = b"trx_key";
+    let data = b"trx_value";
 
-    // Write via run_transact.
-    let dirs = ctx.dirs.clone();
-    run_transact(&ctx.db, "test_write", |tr| {
-        let dirs = dirs.clone();
+    let d = dirs.clone();
+    run_transact(&db, "test_write", |tr| {
+        let d = d.clone();
         async move {
             let meta = ObjectMeta::new_string(1, data.len() as u64);
-            meta.write(&tr, &dirs, key)
+            meta.write(&tr, &d, key)
                 .map_err(|e| foundationdb::FdbBindingError::CustomError(Box::new(e)))?;
-            chunking::write_chunks(&tr, &dirs, key, data);
+            chunking::write_chunks(&tr, &d, key, data);
             Ok(())
         }
     })
     .await
     .unwrap();
 
-    // Read via run_transact.
-    let dirs = ctx.dirs.clone();
-    let result = run_transact(&ctx.db, "test_read", |tr| {
-        let dirs = dirs.clone();
+    let d = dirs.clone();
+    let result = run_transact(&db, "test_read", |tr| {
+        let d = d.clone();
         async move {
-            let meta = ObjectMeta::read(&tr, &dirs, key, 0, false)
+            let meta = ObjectMeta::read(&tr, &d, key, 0, false)
                 .await
                 .map_err(|e| foundationdb::FdbBindingError::CustomError(Box::new(e)))?;
             let meta = meta.expect("key should exist");
-            let value = chunking::read_chunks(&tr, &dirs, key, meta.num_chunks, false)
+            chunking::read_chunks(&tr, &d, key, meta.num_chunks, false)
                 .await
-                .map_err(|e| foundationdb::FdbBindingError::CustomError(Box::new(e)))?;
-            Ok(value)
+                .map_err(|e| foundationdb::FdbBindingError::CustomError(Box::new(e)))
         }
     })
     .await
     .unwrap();
 
     assert_eq!(result, data);
+
+    cleanup(&db, &root).await;
 }

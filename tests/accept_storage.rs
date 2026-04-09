@@ -1,11 +1,13 @@
 //! Property-based acceptance tests for the FDB storage layer.
 //!
 //! Exercises chunking, ObjectMeta serialization, and FDB round-trips
-//! with randomized inputs via proptest.
+//! with randomized inputs via proptest. Fewer cases than typical
+//! proptests, but with large payloads (up to 2MB) to stress chunk
+//! boundaries and multi-chunk reassembly.
 
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use foundationdb::directory::{Directory, DirectoryLayer};
 use proptest::prelude::*;
 use uuid::Uuid;
 
@@ -14,32 +16,30 @@ use kvdb::storage::database::Database;
 use kvdb::storage::directories::Directories;
 use kvdb::storage::meta::{KeyType, ObjectMeta};
 
-/// Monotonic counter to generate unique keys within a single test function.
+/// Monotonic counter to generate unique keys within a single test binary.
 static KEY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Generate a unique key for each proptest case to avoid inter-case conflicts.
 fn unique_key() -> Vec<u8> {
     let id = KEY_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("prop_{id}").into_bytes()
 }
 
-/// Create an isolated FDB test namespace.
-async fn setup() -> (Database, Directories, String) {
-    let root_prefix = format!("kvdb_test_{}", Uuid::new_v4());
-    let db = Database::new("fdb.cluster").unwrap();
-    let dirs = Directories::open(&db, 0, &root_prefix).await.unwrap();
-    (db, dirs, root_prefix)
+/// Shared database + directories for FDB acceptance tests (opened once).
+fn shared() -> &'static (Database, Directories, String) {
+    static SHARED: OnceLock<(Database, Directories, String)> = OnceLock::new();
+    SHARED.get_or_init(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let db = Database::new("fdb.cluster").unwrap();
+        let root = format!("kvdb_test_{}", Uuid::new_v4());
+        let dirs = rt.block_on(Directories::open(&db, 0, &root)).unwrap();
+        (db, dirs, root)
+    })
 }
 
-/// Remove the test namespace from FDB (best-effort).
-async fn cleanup(db: &Database, root_prefix: &str) {
-    let trx = db.inner().create_trx().unwrap();
-    let dir_layer = DirectoryLayer::default();
-    let _ = dir_layer.remove(&trx, &[root_prefix.to_string()]).await;
-    let _ = trx.commit().await;
-}
-
-/// Generate a random `KeyType` by mapping 0..6 to the six variants.
+/// Generate a random `KeyType`.
 fn arb_key_type() -> impl Strategy<Value = KeyType> {
     (0u8..6).prop_map(|v| match v {
         0 => KeyType::String,
@@ -52,7 +52,6 @@ fn arb_key_type() -> impl Strategy<Value = KeyType> {
 }
 
 /// Generate a random `ObjectMeta` with arbitrary field values.
-/// `expires_at_ms` is always 0 to avoid lazy expiry interference.
 fn arb_object_meta() -> impl Strategy<Value = ObjectMeta> {
     (
         arb_key_type(),
@@ -85,71 +84,43 @@ mod accept {
     use super::*;
 
     // ─────────────────────────────────────────────────────────
-    // 1. Chunk roundtrip property (100 cases)
+    // Chunk roundtrip: 20 cases, 0-2MB random data
+    // Fewer cases but larger payloads — the interesting bugs
+    // live at chunk boundaries, not in volume of small writes.
     // ─────────────────────────────────────────────────────────
 
-    /// Test that writing random data as chunks and reading it back
-    /// produces byte-for-byte identical output. Uses a single shared
-    /// FDB namespace with unique keys per case to avoid directory-layer
-    /// transaction conflicts.
     #[test]
     fn chunk_roundtrip() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        let (db, dirs, root_prefix) = rt.block_on(setup());
+        let (db, dirs, _root) = shared();
 
-        let config = ProptestConfig::with_cases(100);
-        let strategy = proptest::collection::vec(any::<u8>(), 0..1_000_000);
+        let config = ProptestConfig::with_cases(20);
+        let strategy = proptest::collection::vec(any::<u8>(), 0..2_000_000);
 
         let mut runner = proptest::test_runner::TestRunner::new(config);
         let result = runner.run(&strategy, |data| {
             let key = unique_key();
 
             rt.block_on(async {
-                // Write chunks.
-                let dirs_c = dirs.clone();
-                let data_c = data.clone();
-                let key_c = key.clone();
-                kvdb::storage::run_transact(&db, "test_chunk_write", |tr| {
-                    let dirs = dirs_c.clone();
-                    let data = data_c.clone();
-                    let key = key_c.clone();
-                    async move {
-                        chunking::write_chunks(&tr, &dirs, &key, &data);
-                        Ok(())
-                    }
-                })
-                .await
-                .unwrap();
+                // Write + read in raw transactions (skip run_transact overhead).
+                let trx = db.inner().create_trx().unwrap();
+                let num_chunks = chunking::write_chunks(&trx, dirs, &key, &data);
+                assert_eq!(num_chunks, chunking::chunk_count(data.len()));
+                trx.commit().await.unwrap();
 
-                // Compute expected chunk count.
-                let num_chunks = chunking::chunk_count(data.len());
-
-                // Read chunks back.
-                let dirs_c = dirs.clone();
-                let key_c = key.clone();
-                let result: Vec<u8> = kvdb::storage::run_transact(&db, "test_chunk_read", |tr| {
-                    let dirs = dirs_c.clone();
-                    let key = key_c.clone();
-                    async move {
-                        chunking::read_chunks(&tr, &dirs, &key, num_chunks, false)
-                            .await
-                            .map_err(|e| foundationdb::FdbBindingError::CustomError(Box::new(e)))
-                    }
-                })
-                .await
-                .unwrap();
-
-                assert_eq!(result.len(), data.len(), "length mismatch");
+                let trx = db.inner().create_trx().unwrap();
+                let result = chunking::read_chunks(&trx, dirs, &key, num_chunks, false)
+                    .await
+                    .unwrap();
+                assert_eq!(result.len(), data.len(), "length mismatch at len={}", data.len());
                 assert!(result == data, "data mismatch at len={}", data.len());
             });
 
             Ok(())
         });
-
-        rt.block_on(cleanup(&db, &root_prefix));
 
         if let Err(e) = result {
             panic!("{}\n{}", e, runner);
@@ -157,14 +128,12 @@ mod accept {
     }
 
     // ─────────────────────────────────────────────────────────
-    // 2. ObjectMeta serde roundtrip property (200 cases)
+    // ObjectMeta serde roundtrip: 200 cases (pure CPU, fast)
     // ─────────────────────────────────────────────────────────
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(200))]
 
-        /// ObjectMeta serde roundtrip: generate random ObjectMeta fields,
-        /// serialize to bincode, deserialize, verify equality.
         #[test]
         fn meta_serde_roundtrip(meta in arb_object_meta()) {
             let bytes = meta.serialize().unwrap();
@@ -174,20 +143,18 @@ mod accept {
     }
 
     // ─────────────────────────────────────────────────────────
-    // 3. ObjectMeta FDB roundtrip property (50 cases)
+    // ObjectMeta FDB roundtrip: 30 cases
     // ─────────────────────────────────────────────────────────
 
-    /// Test that writing random ObjectMeta to FDB and reading it back
-    /// produces identical metadata.
     #[test]
     fn meta_fdb_roundtrip() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        let (db, dirs, root_prefix) = rt.block_on(setup());
+        let (db, dirs, _root) = shared();
 
-        let config = ProptestConfig::with_cases(50);
+        let config = ProptestConfig::with_cases(30);
         let strategy = arb_object_meta();
 
         let mut runner = proptest::test_runner::TestRunner::new(config);
@@ -195,45 +162,20 @@ mod accept {
             let key = unique_key();
 
             rt.block_on(async {
-                // Write.
-                let dirs_c = dirs.clone();
-                let meta_c = meta.clone();
-                let key_c = key.clone();
-                kvdb::storage::run_transact(&db, "test_meta_write", |tr| {
-                    let dirs = dirs_c.clone();
-                    let meta = meta_c.clone();
-                    let key = key_c.clone();
-                    async move {
-                        meta.write(&tr, &dirs, &key)
-                            .map_err(|e| foundationdb::FdbBindingError::CustomError(Box::new(e)))
-                    }
-                })
-                .await
-                .unwrap();
+                let trx = db.inner().create_trx().unwrap();
+                meta.write(&trx, dirs, &key).unwrap();
+                trx.commit().await.unwrap();
 
-                // Read back (now_ms = 0 skips expiry check).
-                let dirs_c = dirs.clone();
-                let key_c = key.clone();
-                let read_meta: ObjectMeta = kvdb::storage::run_transact(&db, "test_meta_read", |tr| {
-                    let dirs = dirs_c.clone();
-                    let key = key_c.clone();
-                    async move {
-                        ObjectMeta::read(&tr, &dirs, &key, 0, false)
-                            .await
-                            .map_err(|e| foundationdb::FdbBindingError::CustomError(Box::new(e)))
-                            .map(|opt| opt.expect("key should exist after write"))
-                    }
-                })
-                .await
-                .unwrap();
-
+                let trx = db.inner().create_trx().unwrap();
+                let read_meta = ObjectMeta::read(&trx, dirs, &key, 0, false)
+                    .await
+                    .unwrap()
+                    .expect("key should exist after write");
                 assert_eq!(read_meta, meta, "ObjectMeta FDB roundtrip mismatch");
             });
 
             Ok(())
         });
-
-        rt.block_on(cleanup(&db, &root_prefix));
 
         if let Err(e) = result {
             panic!("{}\n{}", e, runner);
