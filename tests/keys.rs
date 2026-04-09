@@ -829,3 +829,192 @@ async fn renamenx_fails_when_dst_exists() {
     let dst_val: String = redis::cmd("GET").arg("dst").query_async(&mut con).await.unwrap();
     assert_eq!(dst_val, "dstval");
 }
+
+// ---------------------------------------------------------------------------
+// SELECT tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn select_isolates_databases() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // SET key=value1 in db0
+    let _: () = redis::cmd("SET")
+        .arg("key")
+        .arg("value1")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // SELECT 1
+    let _: String = redis::cmd("SELECT").arg(1).query_async(&mut con).await.unwrap();
+
+    // GET key should be nil in db1
+    let val: Option<String> = redis::cmd("GET").arg("key").query_async(&mut con).await.unwrap();
+    assert!(val.is_none(), "key should not exist in db1");
+
+    // SET key=value2 in db1
+    let _: () = redis::cmd("SET")
+        .arg("key")
+        .arg("value2")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // SELECT 0
+    let _: String = redis::cmd("SELECT").arg(0).query_async(&mut con).await.unwrap();
+
+    // GET key should be value1 in db0
+    let val: String = redis::cmd("GET").arg("key").query_async(&mut con).await.unwrap();
+    assert_eq!(val, "value1");
+
+    // SELECT 1 again
+    let _: String = redis::cmd("SELECT").arg(1).query_async(&mut con).await.unwrap();
+
+    // GET key should be value2 in db1
+    let val: String = redis::cmd("GET").arg("key").query_async(&mut con).await.unwrap();
+    assert_eq!(val, "value2");
+}
+
+#[tokio::test]
+async fn select_out_of_range_returns_error() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // SELECT 16 should error
+    let result: redis::RedisResult<String> = redis::cmd("SELECT").arg(16).query_async(&mut con).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("out of range"),
+        "Expected 'out of range' error, got: {}",
+        err
+    );
+
+    // SELECT -1 should error
+    let result: redis::RedisResult<String> = redis::cmd("SELECT").arg(-1).query_async(&mut con).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("out of range"),
+        "Expected 'out of range' error, got: {}",
+        err
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FLUSHDB tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn flushdb_clears_current_db() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // SET two keys
+    let _: () = redis::cmd("SET").arg("a").arg("1").query_async(&mut con).await.unwrap();
+    let _: () = redis::cmd("SET").arg("b").arg("2").query_async(&mut con).await.unwrap();
+
+    // Verify DBSIZE = 2
+    let size: i64 = redis::cmd("DBSIZE").query_async(&mut con).await.unwrap();
+    assert_eq!(size, 2);
+
+    // FLUSHDB
+    let result: String = redis::cmd("FLUSHDB").query_async(&mut con).await.unwrap();
+    assert_eq!(result, "OK");
+
+    // Verify DBSIZE = 0
+    let size: i64 = redis::cmd("DBSIZE").query_async(&mut con).await.unwrap();
+    assert_eq!(size, 0);
+
+    // Verify keys don't exist
+    let val: Option<String> = redis::cmd("GET").arg("a").query_async(&mut con).await.unwrap();
+    assert!(val.is_none());
+}
+
+#[tokio::test]
+async fn flushdb_does_not_affect_other_db() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // SET key=db0val in db0
+    let _: () = redis::cmd("SET")
+        .arg("key")
+        .arg("db0val")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // SELECT 1
+    let _: String = redis::cmd("SELECT").arg(1).query_async(&mut con).await.unwrap();
+
+    // SET key=db1val in db1
+    let _: () = redis::cmd("SET")
+        .arg("key")
+        .arg("db1val")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // FLUSHDB (in db1)
+    let _: String = redis::cmd("FLUSHDB").query_async(&mut con).await.unwrap();
+
+    // Verify db1 is empty
+    let val: Option<String> = redis::cmd("GET").arg("key").query_async(&mut con).await.unwrap();
+    assert!(val.is_none());
+
+    // SELECT 0
+    let _: String = redis::cmd("SELECT").arg(0).query_async(&mut con).await.unwrap();
+
+    // Verify key still exists in db0
+    let val: String = redis::cmd("GET").arg("key").query_async(&mut con).await.unwrap();
+    assert_eq!(val, "db0val");
+}
+
+// ---------------------------------------------------------------------------
+// FLUSHALL tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn flushall_clears_all_dbs() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // SET key=db0val in db0
+    let _: () = redis::cmd("SET")
+        .arg("key")
+        .arg("db0val")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // SELECT 1
+    let _: String = redis::cmd("SELECT").arg(1).query_async(&mut con).await.unwrap();
+
+    // SET key=db1val in db1
+    let _: () = redis::cmd("SET")
+        .arg("key")
+        .arg("db1val")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // SELECT 0
+    let _: String = redis::cmd("SELECT").arg(0).query_async(&mut con).await.unwrap();
+
+    // FLUSHALL
+    let result: String = redis::cmd("FLUSHALL").query_async(&mut con).await.unwrap();
+    assert_eq!(result, "OK");
+
+    // Verify db0 is empty
+    let size: i64 = redis::cmd("DBSIZE").query_async(&mut con).await.unwrap();
+    assert_eq!(size, 0);
+
+    // SELECT 1
+    let _: String = redis::cmd("SELECT").arg(1).query_async(&mut con).await.unwrap();
+
+    // Verify db1 is empty
+    let size: i64 = redis::cmd("DBSIZE").query_async(&mut con).await.unwrap();
+    assert_eq!(size, 0);
+}

@@ -742,3 +742,134 @@ async fn rename_impl(
 
     Ok(RenameResult::Ok)
 }
+
+// ---------------------------------------------------------------------------
+// SELECT index
+// ---------------------------------------------------------------------------
+
+/// SELECT index -- Switch to the specified database namespace.
+///
+/// Returns OK on success, error if index is out of range (0-15).
+pub async fn handle_select(args: &[Bytes], state: &mut ConnectionState) -> RespValue {
+    if args.len() != 1 {
+        return RespValue::err(CommandError::WrongArity { name: "SELECT".into() }.to_string());
+    }
+
+    let index = match parse_i64_arg(&args[0]) {
+        Ok(v) => v,
+        Err(e) => return RespValue::err(e.to_string()),
+    };
+
+    if !(0..=15).contains(&index) {
+        return RespValue::err("ERR DB index is out of range");
+    }
+
+    let namespace = index as u8;
+
+    // Get or open directories for this namespace.
+    match state.ns_cache.get(namespace).await {
+        Ok(dirs) => {
+            state.dirs = dirs;
+            state.selected_db = namespace;
+            RespValue::ok()
+        }
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FLUSHDB [ASYNC]
+// ---------------------------------------------------------------------------
+
+/// FLUSHDB [ASYNC] -- Delete all keys in the currently selected database.
+///
+/// The ASYNC flag is accepted but ignored (all flushes are synchronous).
+/// Returns OK on success.
+pub async fn handle_flushdb(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    // Accept 0 or 1 args (ASYNC flag, which we ignore).
+    if args.len() > 1 {
+        return RespValue::err(CommandError::WrongArity { name: "FLUSHDB".into() }.to_string());
+    }
+
+    match run_transact(&state.db, "FLUSHDB", |tr| {
+        let dirs = state.dirs.clone();
+        async move {
+            flush_namespace(&tr, &dirs);
+            Ok(())
+        }
+    })
+    .await
+    {
+        Ok(()) => RespValue::ok(),
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FLUSHALL [ASYNC]
+// ---------------------------------------------------------------------------
+
+/// FLUSHALL [ASYNC] -- Delete all keys in all cached databases.
+///
+/// The ASYNC flag is accepted but ignored (all flushes are synchronous).
+/// Returns OK on success.
+pub async fn handle_flushall(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    // Accept 0 or 1 args (ASYNC flag, which we ignore).
+    if args.len() > 1 {
+        return RespValue::err(
+            CommandError::WrongArity {
+                name: "FLUSHALL".into(),
+            }
+            .to_string(),
+        );
+    }
+
+    // Get all cached namespaces.
+    let all_dirs = state.ns_cache.cached_namespaces().await;
+
+    match run_transact(&state.db, "FLUSHALL", |tr| {
+        let dirs_list = all_dirs.clone();
+        async move {
+            for dirs in &dirs_list {
+                flush_namespace(&tr, dirs);
+            }
+            Ok(())
+        }
+    })
+    .await
+    {
+        Ok(()) => RespValue::ok(),
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: flush all subspaces for a namespace
+// ---------------------------------------------------------------------------
+
+/// Clear all 8 subspaces for a single namespace.
+fn flush_namespace(tr: &foundationdb::RetryableTransaction, dirs: &crate::storage::Directories) {
+    let (begin, end) = dirs.meta.range();
+    tr.clear_range(&begin, &end);
+
+    let (begin, end) = dirs.obj.range();
+    tr.clear_range(&begin, &end);
+
+    let (begin, end) = dirs.hash.range();
+    tr.clear_range(&begin, &end);
+
+    let (begin, end) = dirs.set.range();
+    tr.clear_range(&begin, &end);
+
+    let (begin, end) = dirs.zset.range();
+    tr.clear_range(&begin, &end);
+
+    let (begin, end) = dirs.zset_idx.range();
+    tr.clear_range(&begin, &end);
+
+    let (begin, end) = dirs.list.range();
+    tr.clear_range(&begin, &end);
+
+    let (begin, end) = dirs.expire.range();
+    tr.clear_range(&begin, &end);
+}

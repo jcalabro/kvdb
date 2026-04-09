@@ -232,6 +232,9 @@ fn metric_label_for_command(name: &[u8]) -> &'static str {
         b"DBSIZE" => "DBSIZE",
         b"RENAME" => "RENAME",
         b"RENAMENX" => "RENAMENX",
+        b"SELECT" => "SELECT",
+        b"FLUSHDB" => "FLUSHDB",
+        b"FLUSHALL" => "FLUSHALL",
         _ => "UNKNOWN",
     }
 }
