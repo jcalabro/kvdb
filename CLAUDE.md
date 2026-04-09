@@ -17,6 +17,7 @@ All development is done through `just` (a command runner):
 - `just lint` — clippy (deny warnings) + rustfmt check
 - `just fmt` — auto-format code
 - `just up` / `just down` — start/stop local 3-node FDB cluster via docker compose
+- `just smoke` — start server, run smoke test client, stop server
 - `just fuzz` — run cargo-fuzz against RESP parser (requires nightly)
 - `just bench` — criterion benchmarks
 - `just run` — run the server locally in debug mode
