@@ -104,17 +104,44 @@ mod accept {
         let result = runner.run(&strategy, |data| {
             let key = unique_key();
 
-            // Run FDB I/O inside block_on, then assert outside so
-            // prop_assert! can drive proptest shrinking on failure.
+            // Run FDB I/O inside block_on with auto-retry transactions
+            // to handle transient conflicts from parallel test execution.
             let (num_chunks, read_back) = rt.block_on(async {
-                let trx = db.inner().create_trx().unwrap();
-                let nc = chunking::write_chunks(&trx, &dirs.obj, &key, &data);
-                trx.commit().await.unwrap();
-
-                let trx = db.inner().create_trx().unwrap();
-                let rb = chunking::read_chunks(&trx, &dirs.obj, &key, nc, data.len() as u64, false)
+                let d = dirs.obj.clone();
+                let k = key.clone();
+                let data_clone = data.clone();
+                let nc = db
+                    .inner()
+                    .run(|trx, _| {
+                        let d = d.clone();
+                        let k = k.clone();
+                        let data_clone = data_clone.clone();
+                        async move {
+                            let nc = chunking::write_chunks(&trx, &d, &k, &data_clone);
+                            Ok(nc)
+                        }
+                    })
                     .await
                     .unwrap();
+
+                let d = dirs.obj.clone();
+                let k = key.clone();
+                let len = data.len() as u64;
+                let rb = db
+                    .inner()
+                    .run(|trx, _| {
+                        let d = d.clone();
+                        let k = k.clone();
+                        async move {
+                            let rb = chunking::read_chunks(&trx, &d, &k, nc, len, false)
+                                .await
+                                .map_err(|e| foundationdb::FdbBindingError::CustomError(Box::new(e)))?;
+                            Ok(rb)
+                        }
+                    })
+                    .await
+                    .unwrap();
+
                 (nc, rb)
             });
 
@@ -163,15 +190,40 @@ mod accept {
             let key = unique_key();
 
             let read_meta = rt.block_on(async {
-                let trx = db.inner().create_trx().unwrap();
-                meta.write(&trx, dirs, &key).unwrap();
-                trx.commit().await.unwrap();
+                let d = dirs.clone();
+                let k = key.clone();
+                let m = meta.clone();
+                db.inner()
+                    .run(|trx, _| {
+                        let d = d.clone();
+                        let k = k.clone();
+                        let m = m.clone();
+                        async move {
+                            m.write(&trx, &d, &k)
+                                .map_err(|e| foundationdb::FdbBindingError::CustomError(Box::new(e)))?;
+                            Ok(())
+                        }
+                    })
+                    .await
+                    .unwrap();
 
-                let trx = db.inner().create_trx().unwrap();
-                ObjectMeta::read(&trx, dirs, &key, 0, false)
+                let d = dirs.clone();
+                let k = key.clone();
+                db.inner()
+                    .run(|trx, _| {
+                        let d = d.clone();
+                        let k = k.clone();
+                        async move {
+                            ObjectMeta::read(&trx, &d, &k, 0, false)
+                                .await
+                                .map_err(|e| foundationdb::FdbBindingError::CustomError(Box::new(e)))?
+                                .ok_or_else(|| {
+                                    foundationdb::FdbBindingError::CustomError("key should exist after write".into())
+                                })
+                        }
+                    })
                     .await
                     .unwrap()
-                    .expect("key should exist after write")
             });
 
             prop_assert_eq!(read_meta, meta, "ObjectMeta FDB roundtrip mismatch");
