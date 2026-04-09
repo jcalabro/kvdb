@@ -87,7 +87,7 @@ smoke:
 
 # Run the server locally (debug mode)
 run *ARGS:
-    cargo run -- {{ARGS}}
+    cargo run {{ARGS}}
 
 # Clean everything
 clean:
