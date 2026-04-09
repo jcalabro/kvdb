@@ -54,9 +54,7 @@ impl Default for ConnectionState {
 pub async fn handle(mut socket: TcpStream, addr: SocketAddr) -> anyhow::Result<()> {
     debug!(%addr, "new connection");
     metrics::ACTIVE_CONNECTIONS.inc();
-    metrics::CONNECTIONS_TOTAL
-        .with_label_values(&["accepted"])
-        .inc();
+    metrics::CONNECTIONS_TOTAL.with_label_values(&["accepted"]).inc();
 
     let result = run_loop(&mut socket, addr).await;
 
@@ -117,11 +115,7 @@ async fn run_loop(socket: &mut TcpStream, addr: SocketAddr) -> anyhow::Result<()
 /// Dispatch a single parsed RESP value as a command.
 ///
 /// Returns `true` if the connection should be closed after flushing.
-fn dispatch_one(
-    value: RespValue,
-    state: &mut ConnectionState,
-    write_buf: &mut BytesMut,
-) -> bool {
+fn dispatch_one(value: RespValue, state: &mut ConnectionState, write_buf: &mut BytesMut) -> bool {
     match RedisCommand::from_resp(value) {
         Ok(cmd) => {
             let cmd_name = String::from_utf8_lossy(&cmd.name).to_string();
@@ -139,9 +133,7 @@ fn dispatch_one(
             } else {
                 "ok".to_owned()
             };
-            metrics::COMMANDS_TOTAL
-                .with_label_values(&[&cmd_name, &status])
-                .inc();
+            metrics::COMMANDS_TOTAL.with_label_values(&[&cmd_name, &status]).inc();
 
             encoder::encode_into(write_buf, &response, state.protocol_version);
             timer.observe_duration();

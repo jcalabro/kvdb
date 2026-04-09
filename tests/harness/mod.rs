@@ -71,9 +71,7 @@ impl TestContext {
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
         loop {
             if tokio::time::Instant::now() > deadline {
-                panic!(
-                    "test server did not start accepting connections within 5 seconds on {addr}"
-                );
+                panic!("test server did not start accepting connections within 5 seconds on {addr}");
             }
             match tokio::net::TcpStream::connect(addr).await {
                 Ok(_) => break,
@@ -93,10 +91,7 @@ impl TestContext {
 
     /// Get a fresh async multiplexed connection to the test server.
     pub async fn connection(&self) -> redis::aio::MultiplexedConnection {
-        self.client
-            .get_multiplexed_async_connection()
-            .await
-            .unwrap()
+        self.client.get_multiplexed_async_connection().await.unwrap()
     }
 }
 

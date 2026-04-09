@@ -216,7 +216,11 @@ mod tests {
 
     #[test]
     fn command_dispatch_is_case_insensitive() {
-        let cmd = make_cmd(b"PING", vec![]);
+        // dispatch() expects uppercase names (from_resp uppercases),
+        // but verify it matches correctly by sending lowercase through
+        // the full RedisCommand::from_resp path.
+        let value = RespValue::Array(Some(vec![RespValue::BulkString(Some(Bytes::from_static(b"ping")))]));
+        let cmd = RedisCommand::from_resp(value).unwrap();
         assert_eq!(
             dispatch_reply(&cmd),
             RespValue::SimpleString(Bytes::from_static(b"PONG"))
@@ -232,9 +236,9 @@ mod tests {
             other => panic!("expected Reply, got {other:?}"),
         };
         if let RespValue::Map(pairs) = resp {
-            let proto_pair = pairs.iter().find(|(k, _)| {
-                matches!(k, RespValue::BulkString(Some(b)) if b.as_ref() == b"proto")
-            });
+            let proto_pair = pairs
+                .iter()
+                .find(|(k, _)| matches!(k, RespValue::BulkString(Some(b)) if b.as_ref() == b"proto"));
             assert_eq!(proto_pair.unwrap().1, RespValue::Integer(2));
         } else {
             panic!("expected Map, got {resp:?}");
