@@ -1,8 +1,14 @@
 //! FDB transaction wrapper with metrics and retry logic.
 //!
 //! Thin wrapper around `db.run()` that instruments transactions with
-//! duration, retry count, and conflict metrics. M3 will implement
-//! the real FDB integration.
+//! duration, retry count, and conflict metrics.
+
+use foundationdb::options::TransactionOption;
+use foundationdb::{FdbBindingError, RetryableTransaction};
+use tracing::info_span;
+
+use crate::error::StorageError;
+use crate::observability::metrics::FDB_TRANSACTION_DURATION_SECONDS;
 
 /// Transaction isolation mode.
 #[derive(Debug, Clone, Copy)]
@@ -12,4 +18,64 @@ pub enum IsolationMode {
     /// Snapshot reads that don't add to the conflict set.
     /// Use for non-critical reads or large scans.
     Snapshot,
+}
+
+/// Run `closure` inside an FDB transaction with retry logic, metrics,
+/// and a 5-second timeout.
+///
+/// The closure receives a `RetryableTransaction` (which derefs to
+/// `Transaction`) and should perform all reads/writes on it. The
+/// transaction is automatically committed and retried on transient
+/// errors.
+///
+/// `operation` is a label used for Prometheus metrics and tracing
+/// spans (e.g. `"GET"`, `"SET"`, `"HSET"`).
+pub async fn run_transact<F, Fut, T>(
+    db: &super::database::Database,
+    operation: &str,
+    closure: F,
+) -> Result<T, StorageError>
+where
+    F: Fn(RetryableTransaction) -> Fut,
+    Fut: std::future::Future<Output = Result<T, FdbBindingError>>,
+{
+    let span = info_span!("fdb_transact", op = operation);
+    let _enter = span.enter();
+
+    let timer = std::time::Instant::now();
+
+    let op_str = operation.to_owned();
+    let result: Result<T, FdbBindingError> = db
+        .inner()
+        .run(|tr, _maybe_committed| {
+            // Set 5-second timeout on each attempt.
+            let _ = tr.set_option(TransactionOption::Timeout(5000));
+            closure(tr)
+        })
+        .await;
+
+    let elapsed = timer.elapsed().as_secs_f64();
+
+    match &result {
+        Ok(_) => {
+            FDB_TRANSACTION_DURATION_SECONDS
+                .with_label_values(&[op_str.as_str(), "committed"])
+                .observe(elapsed);
+        }
+        Err(e) => {
+            let status = if e.get_fdb_error().is_some_and(|f| f.is_retryable()) {
+                "conflict"
+            } else {
+                "error"
+            };
+            FDB_TRANSACTION_DURATION_SECONDS
+                .with_label_values(&[op_str.as_str(), status])
+                .observe(elapsed);
+        }
+    }
+
+    result.map_err(|e| match e {
+        FdbBindingError::NonRetryableFdbError(fdb_err) => StorageError::Fdb(fdb_err),
+        other => StorageError::FdbBinding(format!("{other}")),
+    })
 }
