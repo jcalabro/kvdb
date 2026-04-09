@@ -31,6 +31,9 @@ pub enum StorageError {
     #[error("FDB binding error: {0}")]
     FdbBinding(String),
 
+    #[error("{0}")]
+    Command(CommandError),
+
     #[error("serialization error: {0}")]
     Serialization(String),
 

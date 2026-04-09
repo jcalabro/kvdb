@@ -110,6 +110,29 @@ impl TestContext {
     pub async fn connection(&self) -> redis::aio::MultiplexedConnection {
         self.client.get_multiplexed_async_connection().await.unwrap()
     }
+
+    /// Write a raw ObjectMeta entry for testing WRONGTYPE enforcement.
+    /// Creates a key with the given type but no actual data.
+    pub async fn write_fake_meta(&self, key: &str, key_type: kvdb::storage::KeyType) {
+        use kvdb::storage::{Directories, ObjectMeta};
+
+        let dirs = Directories::open(&self.db, 0, &self.root_prefix).await.unwrap();
+
+        let trx = self.db.inner().create_trx().unwrap();
+        let meta = ObjectMeta {
+            key_type,
+            num_chunks: 0,
+            size_bytes: 0,
+            expires_at_ms: 0,
+            cardinality: 0,
+            last_accessed_ms: 0,
+            list_head: 0,
+            list_tail: 0,
+            list_length: 0,
+        };
+        meta.write(&trx, &dirs, key.as_bytes()).unwrap();
+        trx.commit().await.unwrap();
+    }
 }
 
 impl Drop for TestContext {

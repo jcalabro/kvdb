@@ -188,8 +188,15 @@ pub fn storage_err(e: StorageError) -> FdbBindingError {
 }
 
 /// Convert a `StorageError` into a RESP error response.
+///
+/// `CommandError` variants (e.g. `WrongType`) already include the correct
+/// Redis error prefix (e.g. `WRONGTYPE ...`), so they are passed through
+/// directly. All other storage errors get wrapped with `ERR`.
 pub fn storage_err_to_resp(e: StorageError) -> RespValue {
-    RespValue::err(format!("ERR {e}"))
+    match e {
+        StorageError::Command(cmd_err) => RespValue::err(cmd_err.to_string()),
+        other => RespValue::err(format!("ERR {other}")),
+    }
 }
 
 /// Compute the number of chunks needed for a given data length.

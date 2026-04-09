@@ -1062,3 +1062,195 @@ async fn setrange_negative_offset_returns_error() {
         .await;
     assert!(result.is_err(), "SETRANGE with negative offset should error");
 }
+
+// ---------------------------------------------------------------------------
+// WRONGTYPE enforcement tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn get_wrongtype_error() {
+    let ctx = TestContext::new().await;
+    ctx.write_fake_meta("hashkey", kvdb::storage::KeyType::Hash).await;
+    let mut con = ctx.connection().await;
+
+    let result: redis::RedisResult<String> = redis::cmd("GET").arg("hashkey").query_async(&mut con).await;
+    assert!(result.is_err(), "GET on Hash key should return WRONGTYPE");
+    let err = format!("{}", result.unwrap_err());
+    assert!(err.contains("WRONGTYPE"), "expected WRONGTYPE error, got: {err}");
+}
+
+#[tokio::test]
+async fn incr_wrongtype_error() {
+    let ctx = TestContext::new().await;
+    ctx.write_fake_meta("hashkey", kvdb::storage::KeyType::Hash).await;
+    let mut con = ctx.connection().await;
+
+    let result: redis::RedisResult<i64> = redis::cmd("INCR").arg("hashkey").query_async(&mut con).await;
+    assert!(result.is_err(), "INCR on Hash key should return WRONGTYPE");
+    let err = format!("{}", result.unwrap_err());
+    assert!(err.contains("WRONGTYPE"), "expected WRONGTYPE error, got: {err}");
+}
+
+#[tokio::test]
+async fn append_wrongtype_error() {
+    let ctx = TestContext::new().await;
+    ctx.write_fake_meta("setkey", kvdb::storage::KeyType::Set).await;
+    let mut con = ctx.connection().await;
+
+    let result: redis::RedisResult<i64> = redis::cmd("APPEND")
+        .arg("setkey")
+        .arg("data")
+        .query_async(&mut con)
+        .await;
+    assert!(result.is_err(), "APPEND on Set key should return WRONGTYPE");
+    let err = format!("{}", result.unwrap_err());
+    assert!(err.contains("WRONGTYPE"), "expected WRONGTYPE error, got: {err}");
+}
+
+#[tokio::test]
+async fn del_works_on_any_type() {
+    let ctx = TestContext::new().await;
+    ctx.write_fake_meta("hashkey", kvdb::storage::KeyType::Hash).await;
+    let mut con = ctx.connection().await;
+
+    let count: i64 = redis::cmd("DEL").arg("hashkey").query_async(&mut con).await.unwrap();
+    assert_eq!(count, 1, "DEL should work on any type");
+}
+
+#[tokio::test]
+async fn exists_works_on_any_type() {
+    let ctx = TestContext::new().await;
+    ctx.write_fake_meta("listkey", kvdb::storage::KeyType::List).await;
+    let mut con = ctx.connection().await;
+
+    let count: i64 = redis::cmd("EXISTS").arg("listkey").query_async(&mut con).await.unwrap();
+    assert_eq!(count, 1, "EXISTS should work on any type");
+}
+
+#[tokio::test]
+async fn mget_returns_nil_for_wrong_type() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // Create a normal string key.
+    let _: () = redis::cmd("SET")
+        .arg("strkey")
+        .arg("hello")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // Create a Hash-type meta entry.
+    ctx.write_fake_meta("hashkey", kvdb::storage::KeyType::Hash).await;
+
+    let result: Vec<Option<String>> = redis::cmd("MGET")
+        .arg("strkey")
+        .arg("hashkey")
+        .arg("missing")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(
+        result,
+        vec![Some("hello".to_string()), None, None],
+        "MGET should return nil for wrong-type keys (no error)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Expiry interaction tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn get_expired_key_returns_nil() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: () = redis::cmd("SET")
+        .arg("k")
+        .arg("v")
+        .arg("PX")
+        .arg("1")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    let result: Option<String> = redis::cmd("GET").arg("k").query_async(&mut con).await.unwrap();
+    assert_eq!(result, None, "GET on expired key should return nil");
+}
+
+#[tokio::test]
+async fn exists_expired_key_returns_zero() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: () = redis::cmd("SET")
+        .arg("k")
+        .arg("v")
+        .arg("PX")
+        .arg("1")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    let count: i64 = redis::cmd("EXISTS").arg("k").query_async(&mut con).await.unwrap();
+    assert_eq!(count, 0, "EXISTS on expired key should return 0");
+}
+
+#[tokio::test]
+async fn incr_expired_key_starts_from_zero() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: () = redis::cmd("SET")
+        .arg("k")
+        .arg("42")
+        .arg("PX")
+        .arg("1")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    let val: i64 = redis::cmd("INCR").arg("k").query_async(&mut con).await.unwrap();
+    assert_eq!(val, 1, "INCR on expired key should start from 0 and return 1");
+}
+
+// ---------------------------------------------------------------------------
+// Large value SET GET with old-value return
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn large_value_set_get_returns_old() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // 500KB value — multi-chunk
+    let big = "x".repeat(500_000);
+
+    let _: () = redis::cmd("SET")
+        .arg("bigkey")
+        .arg(&big)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // SET with GET should return the old 500KB value
+    let old: Option<String> = redis::cmd("SET")
+        .arg("bigkey")
+        .arg("new_val")
+        .arg("GET")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(old, Some(big), "SET GET should return the old large value");
+
+    // Confirm new value was set
+    let val: String = redis::cmd("GET").arg("bigkey").query_async(&mut con).await.unwrap();
+    assert_eq!(val, "new_val");
+}

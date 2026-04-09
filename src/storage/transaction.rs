@@ -7,7 +7,7 @@ use foundationdb::options::TransactionOption;
 use foundationdb::{FdbBindingError, RetryableTransaction};
 use tracing::info_span;
 
-use crate::error::StorageError;
+use crate::error::{CommandError, StorageError};
 use crate::observability::metrics::FDB_TRANSACTION_DURATION_SECONDS;
 
 /// Transaction isolation mode.
@@ -85,6 +85,14 @@ where
 
     result.map_err(|e| match e {
         FdbBindingError::NonRetryableFdbError(fdb_err) => StorageError::Fdb(fdb_err),
+        FdbBindingError::CustomError(boxed) => {
+            // Try to extract a CommandError (e.g. WrongType) to preserve
+            // the original Redis error prefix on the wire.
+            match boxed.downcast::<CommandError>() {
+                Ok(cmd_err) => StorageError::Command(*cmd_err),
+                Err(other) => StorageError::FdbBinding(format!("{other}")),
+            }
+        }
         other => StorageError::FdbBinding(format!("{other}")),
     })
 }
