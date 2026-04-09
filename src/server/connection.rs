@@ -19,7 +19,7 @@ use crate::commands::{self, CommandResponse};
 use crate::observability::metrics;
 use crate::protocol::types::{RedisCommand, RespValue};
 use crate::protocol::{encoder, parser};
-use crate::storage::{Database, Directories};
+use crate::storage::{Database, Directories, NamespaceCache};
 
 /// Initial capacity for per-connection read and write buffers.
 const INITIAL_BUF_CAPACITY: usize = 8 * 1024;
@@ -45,16 +45,19 @@ pub struct ConnectionState {
     pub db: Database,
     /// FDB directory subspaces for the current namespace.
     pub dirs: Directories,
+    /// Shared cache of opened directory handles for all namespaces.
+    pub ns_cache: NamespaceCache,
 }
 
 impl ConnectionState {
     /// Create a new connection state with the given FDB handles.
-    pub fn new(db: Database, dirs: Directories) -> Self {
+    pub fn new(db: Database, dirs: Directories, ns_cache: NamespaceCache) -> Self {
         Self {
             protocol_version: 2,
             selected_db: 0,
             db,
             dirs,
+            ns_cache,
         }
     }
 
@@ -67,9 +70,9 @@ impl ConnectionState {
     pub fn default_for_test() -> Self {
         use std::sync::OnceLock;
 
-        static TEST_FDB: OnceLock<(Database, Directories)> = OnceLock::new();
+        static TEST_FDB: OnceLock<(Database, Directories, NamespaceCache)> = OnceLock::new();
 
-        let (db, dirs) = TEST_FDB.get_or_init(|| {
+        let (db, dirs, ns_cache) = TEST_FDB.get_or_init(|| {
             // Spawn a dedicated thread for initialization to avoid
             // "cannot start a runtime from within a runtime" when
             // called inside #[tokio::test].
@@ -82,7 +85,8 @@ impl ConnectionState {
                 let dirs = rt
                     .block_on(Directories::open(&db, 0, "kvdb_test_unit"))
                     .expect("failed to open directories for tests");
-                (db, dirs)
+                let ns_cache = NamespaceCache::new(db.clone(), "kvdb_test_unit".to_string(), dirs.clone());
+                (db, dirs, ns_cache)
             })
             .join()
             .expect("test FDB init thread panicked")
@@ -93,6 +97,7 @@ impl ConnectionState {
             selected_db: 0,
             db: db.clone(),
             dirs: dirs.clone(),
+            ns_cache: ns_cache.clone(),
         }
     }
 }
@@ -103,12 +108,18 @@ impl ConnectionState {
 /// responses back. Supports pipelining (multiple commands buffered
 /// before flushing). Returns when the client disconnects or QUIT is
 /// received.
-pub async fn handle(mut socket: TcpStream, addr: SocketAddr, db: Database, dirs: Directories) -> anyhow::Result<()> {
+pub async fn handle(
+    mut socket: TcpStream,
+    addr: SocketAddr,
+    db: Database,
+    dirs: Directories,
+    ns_cache: NamespaceCache,
+) -> anyhow::Result<()> {
     debug!(%addr, "new connection");
     metrics::ACTIVE_CONNECTIONS.inc();
     metrics::CONNECTIONS_TOTAL.with_label_values(&["accepted"]).inc();
 
-    let result = run_loop(&mut socket, addr, db, dirs).await;
+    let result = run_loop(&mut socket, addr, db, dirs, ns_cache).await;
 
     metrics::ACTIVE_CONNECTIONS.dec();
     debug!(%addr, "connection closed");
@@ -120,8 +131,14 @@ pub async fn handle(mut socket: TcpStream, addr: SocketAddr, db: Database, dirs:
 ///
 /// Separated from `handle()` so metrics bookkeeping happens exactly
 /// once regardless of how the loop exits.
-async fn run_loop(socket: &mut TcpStream, addr: SocketAddr, db: Database, dirs: Directories) -> anyhow::Result<()> {
-    let mut state = ConnectionState::new(db, dirs);
+async fn run_loop(
+    socket: &mut TcpStream,
+    addr: SocketAddr,
+    db: Database,
+    dirs: Directories,
+    ns_cache: NamespaceCache,
+) -> anyhow::Result<()> {
+    let mut state = ConnectionState::new(db, dirs, ns_cache);
     let mut read_buf = BytesMut::with_capacity(INITIAL_BUF_CAPACITY);
     let mut write_buf = BytesMut::with_capacity(INITIAL_BUF_CAPACITY);
 
