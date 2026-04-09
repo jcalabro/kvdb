@@ -28,3 +28,5 @@ fuzz/corpus/
 # Added by cargo
 
 /target
+
+/docs
