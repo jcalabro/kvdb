@@ -15,8 +15,30 @@ pub enum Error {
     #[error("command error: {0}")]
     Command(#[from] CommandError),
 
+    #[error("storage error: {0}")]
+    Storage(#[from] StorageError),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// Errors from the FDB storage layer.
+#[derive(Error, Debug)]
+pub enum StorageError {
+    #[error("FDB error: {0}")]
+    Fdb(#[from] foundationdb::FdbError),
+
+    #[error("FDB binding error: {0}")]
+    FdbBinding(String),
+
+    #[error("serialization error: {0}")]
+    Serialization(String),
+
+    #[error("data corruption: {0}")]
+    DataCorruption(String),
+
+    #[error("directory error: {0}")]
+    Directory(String),
 }
 
 /// Errors during RESP protocol parsing or encoding.
