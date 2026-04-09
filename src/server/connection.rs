@@ -221,6 +221,11 @@ fn metric_label_for_command(name: &[u8]) -> &'static str {
         b"PTTL" => "PTTL",
         b"EXPIRETIME" => "EXPIRETIME",
         b"PEXPIRETIME" => "PEXPIRETIME",
+        b"EXPIRE" => "EXPIRE",
+        b"PEXPIRE" => "PEXPIRE",
+        b"EXPIREAT" => "EXPIREAT",
+        b"PEXPIREAT" => "PEXPIREAT",
+        b"PERSIST" => "PERSIST",
         _ => "UNKNOWN",
     }
 }

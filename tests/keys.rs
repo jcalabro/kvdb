@@ -330,3 +330,184 @@ async fn pexpiretime_wrong_arity() {
     let result: redis::RedisResult<i64> = redis::cmd("PEXPIRETIME").arg("a").arg("b").query_async(&mut con).await;
     assert!(result.is_err(), "PEXPIRETIME with 2 args should error");
 }
+
+// ---------------------------------------------------------------------------
+// EXPIRE tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn expire_sets_ttl() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // SET key without TTL
+    let _: () = redis::cmd("SET")
+        .arg("mykey")
+        .arg("value")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // EXPIRE with 10 seconds
+    let result: i64 = redis::cmd("EXPIRE")
+        .arg("mykey")
+        .arg(10)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(result, 1);
+
+    // Verify TTL is set
+    let ttl: i64 = redis::cmd("TTL").arg("mykey").query_async(&mut con).await.unwrap();
+    assert!(ttl > 0 && ttl <= 10, "TTL should be in (0, 10], got {}", ttl);
+}
+
+#[tokio::test]
+async fn expire_nonexistent_returns_zero() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let result: i64 = redis::cmd("EXPIRE")
+        .arg("nonexistent")
+        .arg(10)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(result, 0);
+}
+
+// ---------------------------------------------------------------------------
+// PEXPIRE tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn pexpire_sets_ttl_ms() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // SET key without TTL
+    let _: () = redis::cmd("SET")
+        .arg("mykey")
+        .arg("value")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // PEXPIRE with 50000 milliseconds
+    let result: i64 = redis::cmd("PEXPIRE")
+        .arg("mykey")
+        .arg(50000)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(result, 1);
+
+    // Verify PTTL is set
+    let pttl: i64 = redis::cmd("PTTL").arg("mykey").query_async(&mut con).await.unwrap();
+    assert!(pttl > 0 && pttl <= 50000, "PTTL should be in (0, 50000], got {}", pttl);
+}
+
+// ---------------------------------------------------------------------------
+// EXPIREAT tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn expireat_sets_absolute_expiry() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // SET key without TTL
+    let _: () = redis::cmd("SET")
+        .arg("mykey")
+        .arg("value")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // Get future timestamp (now + 60 seconds)
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let future_ts = now_secs + 60;
+
+    // EXPIREAT with future timestamp
+    let result: i64 = redis::cmd("EXPIREAT")
+        .arg("mykey")
+        .arg(future_ts)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(result, 1);
+
+    // Verify EXPIRETIME matches
+    let expiretime: i64 = redis::cmd("EXPIRETIME")
+        .arg("mykey")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(expiretime, future_ts);
+}
+
+// ---------------------------------------------------------------------------
+// PERSIST tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn persist_removes_ttl() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // SET with EX
+    let _: () = redis::cmd("SET")
+        .arg("mykey")
+        .arg("value")
+        .arg("EX")
+        .arg(100)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // Verify TTL is set
+    let ttl: i64 = redis::cmd("TTL").arg("mykey").query_async(&mut con).await.unwrap();
+    assert!(ttl > 0, "TTL should be positive before PERSIST");
+
+    // PERSIST should return 1
+    let result: i64 = redis::cmd("PERSIST").arg("mykey").query_async(&mut con).await.unwrap();
+    assert_eq!(result, 1);
+
+    // Verify TTL is now -1 (no expiry)
+    let ttl: i64 = redis::cmd("TTL").arg("mykey").query_async(&mut con).await.unwrap();
+    assert_eq!(ttl, -1);
+}
+
+#[tokio::test]
+async fn persist_no_ttl_returns_zero() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // SET without EX
+    let _: () = redis::cmd("SET")
+        .arg("mykey")
+        .arg("value")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // PERSIST on key without TTL should return 0
+    let result: i64 = redis::cmd("PERSIST").arg("mykey").query_async(&mut con).await.unwrap();
+    assert_eq!(result, 0);
+}
+
+#[tokio::test]
+async fn persist_nonexistent_returns_zero() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let result: i64 = redis::cmd("PERSIST")
+        .arg("nonexistent")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(result, 0);
+}
