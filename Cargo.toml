@@ -32,12 +32,18 @@ prometheus = { version = "0.14", features = ["process"] }
 lazy_static = "1"
 tracing-tracy = { version = "0.11", default-features = false, features = ["enable", "flush-on-exit"], optional = true }
 
+# Storage: FoundationDB client + serialization
+foundationdb = { version = "0.10", features = ["fdb-7_3"] }
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+
 [dev-dependencies]
 proptest = "1"
 criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 redis = { version = "0.27", features = ["tokio-comp", "aio"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 rand = "0.8"
+uuid = { version = "1", features = ["v4"] }
 
 [[bench]]
 name = "commands"
