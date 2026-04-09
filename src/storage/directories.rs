@@ -20,9 +20,7 @@ use tracing::info_span;
 use crate::error::StorageError;
 
 /// The eight subspace names under each namespace.
-const SUBSPACE_NAMES: [&str; 8] = [
-    "meta", "obj", "hash", "set", "zset", "zset_idx", "list", "expire",
-];
+const SUBSPACE_NAMES: [&str; 8] = ["meta", "obj", "hash", "set", "zset", "zset_idx", "list", "expire"];
 
 /// Holds FDB subspace handles for a single namespace.
 ///
@@ -61,21 +59,14 @@ impl Directories {
 
         let ns_str = namespace.to_string();
 
-        let trx = db
-            .inner()
-            .create_trx()
-            .map_err(|e| StorageError::Fdb(e))?;
+        let trx = db.inner().create_trx().map_err(|e| StorageError::Fdb(e))?;
 
         let dir_layer = DirectoryLayer::default();
 
         let mut subspaces: Vec<DirectorySubspace> = Vec::with_capacity(8);
 
         for name in &SUBSPACE_NAMES {
-            let path = vec![
-                "kvdb".to_string(),
-                ns_str.clone(),
-                (*name).to_string(),
-            ];
+            let path = vec!["kvdb".to_string(), ns_str.clone(), (*name).to_string()];
 
             let output = dir_layer
                 .create_or_open(&trx, &path, None, None)
@@ -94,9 +85,7 @@ impl Directories {
             }
         }
 
-        trx.commit()
-            .await
-            .map_err(|e| StorageError::Fdb(e.into()))?;
+        trx.commit().await.map_err(|e| StorageError::Fdb(e.into()))?;
 
         // SUBSPACE_NAMES order: meta, obj, hash, set, zset, zset_idx, list, expire
         Ok(Self {

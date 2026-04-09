@@ -37,12 +37,7 @@ fn chunk_key(dirs: &Directories, key: &[u8], chunk_index: u32) -> Vec<u8> {
 /// buffers the writes in the transaction.
 ///
 /// Returns the number of chunks written.
-pub fn write_chunks(
-    tr: &Transaction,
-    dirs: &Directories,
-    key: &[u8],
-    data: &[u8],
-) -> u32 {
+pub fn write_chunks(tr: &Transaction, dirs: &Directories, key: &[u8], data: &[u8]) -> u32 {
     let _span = debug_span!("write_chunks", key_len = key.len(), data_len = data.len()).entered();
 
     if data.is_empty() {

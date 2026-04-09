@@ -102,10 +102,7 @@ impl ObjectMeta {
         let _span = trace_span!("meta_read").entered();
 
         let fdb_key = dirs.meta_key(key);
-        let maybe_val = tr
-            .get(&fdb_key, snapshot)
-            .await
-            .map_err(StorageError::Fdb)?;
+        let maybe_val = tr.get(&fdb_key, snapshot).await.map_err(StorageError::Fdb)?;
 
         match maybe_val {
             None => Ok(None),

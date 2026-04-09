@@ -12,4 +12,4 @@ pub mod transaction;
 pub use database::Database;
 pub use directories::Directories;
 pub use meta::{KeyType, ObjectMeta};
-pub use transaction::{run_transact, IsolationMode};
+pub use transaction::{IsolationMode, run_transact};
