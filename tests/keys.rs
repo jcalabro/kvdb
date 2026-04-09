@@ -638,3 +638,194 @@ async fn dbsize_reflects_key_count() {
     let result: i64 = redis::cmd("DBSIZE").query_async(&mut con).await.unwrap();
     assert_eq!(result, 2);
 }
+
+// ---------------------------------------------------------------------------
+// RENAME tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn rename_moves_key() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // SET src=hello
+    let _: () = redis::cmd("SET")
+        .arg("src")
+        .arg("hello")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // RENAME src dst
+    let result: String = redis::cmd("RENAME")
+        .arg("src")
+        .arg("dst")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(result, "OK");
+
+    // GET src should be nil
+    let src_val: Option<String> = redis::cmd("GET").arg("src").query_async(&mut con).await.unwrap();
+    assert!(src_val.is_none());
+
+    // GET dst should be hello
+    let dst_val: String = redis::cmd("GET").arg("dst").query_async(&mut con).await.unwrap();
+    assert_eq!(dst_val, "hello");
+}
+
+#[tokio::test]
+async fn rename_nonexistent_returns_error() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // RENAME nosuchkey dst should error
+    let result: redis::RedisResult<String> = redis::cmd("RENAME")
+        .arg("nosuchkey")
+        .arg("dst")
+        .query_async(&mut con)
+        .await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("no such key"),
+        "Expected 'no such key' error, got: {}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn rename_preserves_ttl() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // SET src with EX 100 seconds
+    let _: () = redis::cmd("SET")
+        .arg("src")
+        .arg("value")
+        .arg("EX")
+        .arg(100)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // RENAME src dst
+    let _: String = redis::cmd("RENAME")
+        .arg("src")
+        .arg("dst")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // TTL dst should be in (0, 100]
+    let ttl: i64 = redis::cmd("TTL").arg("dst").query_async(&mut con).await.unwrap();
+    assert!(ttl > 0 && ttl <= 100, "TTL should be in (0, 100], got {}", ttl);
+}
+
+#[tokio::test]
+async fn rename_overwrites_destination() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // SET src=new
+    let _: () = redis::cmd("SET")
+        .arg("src")
+        .arg("new")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // SET dst=old
+    let _: () = redis::cmd("SET")
+        .arg("dst")
+        .arg("old")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // RENAME src dst
+    let _: String = redis::cmd("RENAME")
+        .arg("src")
+        .arg("dst")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // GET dst should be new
+    let dst_val: String = redis::cmd("GET").arg("dst").query_async(&mut con).await.unwrap();
+    assert_eq!(dst_val, "new");
+}
+
+// ---------------------------------------------------------------------------
+// RENAMENX tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn renamenx_succeeds_when_dst_missing() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // SET src
+    let _: () = redis::cmd("SET")
+        .arg("src")
+        .arg("value")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // RENAMENX src dst should return 1
+    let result: i64 = redis::cmd("RENAMENX")
+        .arg("src")
+        .arg("dst")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(result, 1);
+
+    // GET dst should be value
+    let dst_val: String = redis::cmd("GET").arg("dst").query_async(&mut con).await.unwrap();
+    assert_eq!(dst_val, "value");
+
+    // GET src should be nil
+    let src_val: Option<String> = redis::cmd("GET").arg("src").query_async(&mut con).await.unwrap();
+    assert!(src_val.is_none());
+}
+
+#[tokio::test]
+async fn renamenx_fails_when_dst_exists() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // SET src
+    let _: () = redis::cmd("SET")
+        .arg("src")
+        .arg("srcval")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // SET dst
+    let _: () = redis::cmd("SET")
+        .arg("dst")
+        .arg("dstval")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // RENAMENX src dst should return 0
+    let result: i64 = redis::cmd("RENAMENX")
+        .arg("src")
+        .arg("dst")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(result, 0);
+
+    // GET src should still exist
+    let src_val: String = redis::cmd("GET").arg("src").query_async(&mut con).await.unwrap();
+    assert_eq!(src_val, "srcval");
+
+    // GET dst should be unchanged
+    let dst_val: String = redis::cmd("GET").arg("dst").query_async(&mut con).await.unwrap();
+    assert_eq!(dst_val, "dstval");
+}

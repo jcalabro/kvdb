@@ -230,6 +230,8 @@ fn metric_label_for_command(name: &[u8]) -> &'static str {
         b"UNLINK" => "UNLINK",
         b"TOUCH" => "TOUCH",
         b"DBSIZE" => "DBSIZE",
+        b"RENAME" => "RENAME",
+        b"RENAMENX" => "RENAMENX",
         _ => "UNKNOWN",
     }
 }

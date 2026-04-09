@@ -579,3 +579,166 @@ pub async fn handle_dbsize(args: &[Bytes], state: &ConnectionState) -> RespValue
         Err(e) => helpers::storage_err_to_resp(e),
     }
 }
+
+// ---------------------------------------------------------------------------
+// RENAME key newkey
+// ---------------------------------------------------------------------------
+
+/// RENAME key newkey -- Atomically move a key to a new name.
+///
+/// Overwrites the destination if it exists.
+/// Returns OK on success, error if source doesn't exist.
+pub async fn handle_rename(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.len() != 2 {
+        return RespValue::err(CommandError::WrongArity { name: "RENAME".into() }.to_string());
+    }
+
+    match run_transact(&state.db, "RENAME", |tr| {
+        let dirs = state.dirs.clone();
+        let src_key = args[0].clone();
+        let dst_key = args[1].clone();
+        async move {
+            let result = rename_impl(&tr, &dirs, &src_key, &dst_key, false).await?;
+            match result {
+                RenameResult::Ok => Ok(()),
+                RenameResult::DestExists => unreachable!("RENAME should always overwrite"),
+            }
+        }
+    })
+    .await
+    {
+        Ok(()) => RespValue::ok(),
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RENAMENX key newkey
+// ---------------------------------------------------------------------------
+
+/// RENAMENX key newkey -- Atomically move a key to a new name if destination doesn't exist.
+///
+/// Returns:
+/// - 1 if the key was renamed
+/// - 0 if the destination already exists
+/// - error if source doesn't exist
+pub async fn handle_renamenx(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.len() != 2 {
+        return RespValue::err(
+            CommandError::WrongArity {
+                name: "RENAMENX".into(),
+            }
+            .to_string(),
+        );
+    }
+
+    match run_transact(&state.db, "RENAMENX", |tr| {
+        let dirs = state.dirs.clone();
+        let src_key = args[0].clone();
+        let dst_key = args[1].clone();
+        async move {
+            let result = rename_impl(&tr, &dirs, &src_key, &dst_key, true).await?;
+            match result {
+                RenameResult::Ok => Ok(1i64),
+                RenameResult::DestExists => Ok(0i64),
+            }
+        }
+    })
+    .await
+    {
+        Ok(val) => RespValue::Integer(val),
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared RENAME implementation
+// ---------------------------------------------------------------------------
+
+/// Result of rename_impl.
+enum RenameResult {
+    Ok,
+    DestExists,
+}
+
+/// Shared implementation for RENAME and RENAMENX.
+///
+/// If `nx` is true, returns `DestExists` if destination exists (live).
+/// Otherwise, overwrites the destination.
+async fn rename_impl(
+    tr: &foundationdb::RetryableTransaction,
+    dirs: &crate::storage::Directories,
+    src_key: &[u8],
+    dst_key: &[u8],
+    nx: bool,
+) -> Result<RenameResult, foundationdb::FdbBindingError> {
+    let now = helpers::now_ms();
+
+    // 1. Read source meta with now_ms=0 to see expired keys too.
+    let src_meta = ObjectMeta::read(tr, dirs, src_key, 0, false)
+        .await
+        .map_err(helpers::storage_err)?;
+
+    let src_meta = match src_meta {
+        Some(m) => m,
+        None => {
+            return Err(helpers::cmd_err(CommandError::Generic("ERR no such key".into())));
+        }
+    };
+
+    // 2. If source is expired, clean it up and return error.
+    if src_meta.is_expired(now) {
+        helpers::delete_object(tr, dirs, src_key, now)
+            .await
+            .map_err(helpers::cmd_err)?;
+        return Err(helpers::cmd_err(CommandError::Generic("ERR no such key".into())));
+    }
+
+    // 3. If src == dst, return OK (no-op).
+    if src_key == dst_key {
+        return Ok(RenameResult::Ok);
+    }
+
+    // 4. For RENAMENX: check if destination exists (live).
+    if nx {
+        let dst_meta = ObjectMeta::read(tr, dirs, dst_key, now, false)
+            .await
+            .map_err(helpers::storage_err)?;
+        if dst_meta.is_some() {
+            return Ok(RenameResult::DestExists);
+        }
+    }
+
+    // 5. Only String type is implemented for now.
+    if src_meta.key_type != crate::storage::meta::KeyType::String {
+        return Err(helpers::cmd_err(CommandError::Generic(
+            "ERR RENAME of non-string types not yet supported".into(),
+        )));
+    }
+
+    // 6. Read source data.
+    let src_data = helpers::get_string(tr, dirs, src_key, 0)
+        .await
+        .map_err(helpers::cmd_err)?;
+    let src_data = match src_data {
+        Some(d) => d,
+        None => {
+            return Err(helpers::cmd_err(CommandError::Generic("ERR no such key".into())));
+        }
+    };
+
+    // 7. Delete destination if it exists (even if expired).
+    helpers::delete_object(tr, dirs, dst_key, 0)
+        .await
+        .map_err(helpers::cmd_err)?;
+
+    // 8. Write source data to destination, preserving expires_at_ms.
+    helpers::write_string(tr, dirs, dst_key, &src_data, src_meta.expires_at_ms, None).map_err(helpers::cmd_err)?;
+
+    // 9. Delete source (even if expired).
+    helpers::delete_object(tr, dirs, src_key, 0)
+        .await
+        .map_err(helpers::cmd_err)?;
+
+    Ok(RenameResult::Ok)
+}

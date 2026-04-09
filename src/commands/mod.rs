@@ -83,6 +83,8 @@ pub async fn dispatch(cmd: &RedisCommand, state: &mut ConnectionState) -> Comman
         b"UNLINK" => CommandResponse::Reply(keys::handle_unlink(&cmd.args, state).await),
         b"TOUCH" => CommandResponse::Reply(keys::handle_touch(&cmd.args, state).await),
         b"DBSIZE" => CommandResponse::Reply(keys::handle_dbsize(&cmd.args, state).await),
+        b"RENAME" => CommandResponse::Reply(keys::handle_rename(&cmd.args, state).await),
+        b"RENAMENX" => CommandResponse::Reply(keys::handle_renamenx(&cmd.args, state).await),
         _ => {
             let name_str = sanitize_for_error(&cmd.name);
             let mut msg = format!("ERR unknown command '{name_str}', with args beginning with:");
