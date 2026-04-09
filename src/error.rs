@@ -84,6 +84,12 @@ pub enum CommandError {
     #[error("WRONGTYPE Operation against a key holding the wrong kind of value")]
     WrongType,
 
+    #[error("ERR value is not an integer or out of range")]
+    ValueNotInteger { value: String },
+
+    #[error("ERR {0}")]
+    InvalidExpireTime(String),
+
     #[error("ERR {0}")]
     Generic(String),
 }

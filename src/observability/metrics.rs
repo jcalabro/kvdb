@@ -10,7 +10,7 @@
 
 use std::net::SocketAddr;
 
-use prometheus::{Encoder, Gauge, HistogramVec, IntCounterVec, IntGauge, TextEncoder};
+use prometheus::{Encoder, Gauge, Histogram, HistogramVec, IntCounterVec, IntGauge, TextEncoder};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tracing::{error, warn};
@@ -87,6 +87,13 @@ lazy_static::lazy_static! {
     pub static ref EXPIRY_BACKLOG: Gauge = prometheus::register_gauge!(
         "kvdb_expiry_backlog",
         "Estimated keys pending active expiration"
+    ).unwrap();
+
+    /// Duration of each background expiry scan iteration.
+    pub static ref EXPIRY_SCAN_DURATION_SECONDS: Histogram = prometheus::register_histogram!(
+        "kvdb_expiry_scan_duration_seconds",
+        "Time spent per background expiry scan iteration",
+        vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]
     ).unwrap();
 }
 

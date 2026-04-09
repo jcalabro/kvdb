@@ -6,9 +6,8 @@
 //!   expired keys as non-existent.
 //! - **Active**: a background worker scans the `expire/` directory every
 //!   250ms and cleans up expired keys in batches.
-//!
-//! M5 will implement the full expiry worker. This module defines the
-//! interface.
+
+pub mod worker;
 
 /// Configuration for the background expiry worker.
 #[derive(Debug, Clone)]

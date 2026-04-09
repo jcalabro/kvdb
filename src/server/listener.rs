@@ -7,12 +7,14 @@ use std::sync::Arc;
 
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::config::ServerConfig;
 use crate::observability::metrics;
 use crate::server::connection;
-use crate::storage::{Database, Directories};
+use crate::storage::{Database, Directories, NamespaceCache};
+use crate::ttl;
 
 /// Maximum number of retries for opening FDB directories.
 ///
@@ -51,6 +53,16 @@ pub async fn run(config: ServerConfig, shutdown: tokio::sync::broadcast::Receive
     }
     let dirs = dirs.expect("directory open succeeded within retry limit");
 
+    let ns_cache = NamespaceCache::new(db.clone(), root_prefix.to_string(), dirs.clone());
+
+    // Spawn the background expiry worker.
+    let cancel_token = CancellationToken::new();
+    let worker_cancel = cancel_token.clone();
+    let worker_ns_cache = ns_cache.clone();
+    tokio::spawn(async move {
+        ttl::worker::run(worker_ns_cache, ttl::ExpiryConfig::default(), worker_cancel).await;
+    });
+
     let listener = TcpListener::bind(config.bind_addr).await?;
     let semaphore = Arc::new(Semaphore::new(config.max_connections));
 
@@ -79,8 +91,9 @@ pub async fn run(config: ServerConfig, shutdown: tokio::sync::broadcast::Receive
 
                 let conn_db = db.clone();
                 let conn_dirs = dirs.clone();
+                let conn_ns_cache = ns_cache.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = connection::handle(socket, addr, conn_db, conn_dirs).await {
+                    if let Err(e) = connection::handle(socket, addr, conn_db, conn_dirs, conn_ns_cache).await {
                         error!(%addr, error = %e, "connection error");
                     }
                     drop(permit);
@@ -88,6 +101,7 @@ pub async fn run(config: ServerConfig, shutdown: tokio::sync::broadcast::Receive
             }
             _ = shutdown.recv() => {
                 info!("shutting down listener");
+                cancel_token.cancel();
                 break;
             }
         }

@@ -95,7 +95,7 @@ impl Stats {
 //
 // Weights loosely model a read-heavy web-app workload:
 //
-//   GET          35%    — point reads dominate
+//   GET          31%    — point reads dominate
 //   SET          15%    — writes (some with TTL, NX, XX, GET)
 //   MGET          8%    — batch reads
 //   MSET          4%    — batch writes
@@ -111,6 +111,7 @@ impl Stats {
 //   SETNX         2%    — conditional sets
 //   SETEX/PSETEX  2%    — sets with TTL
 //   GETDEL        1%    — atomic get-and-delete
+//   TTL ops       4%    — TTL management (EXPIRE, TTL, PERSIST, TYPE)
 //   PING          1%    — health checks
 //
 // Total = 100%
@@ -142,13 +143,59 @@ async fn run_one_op(
     let app_key = format!("lg:a:{}", rng.gen_range(0..key_space));
 
     match roll {
-        // ----- GET (35%) -----
-        0..=34 => redis::cmd("GET")
+        // ----- GET (31%) -----
+        0..=30 => redis::cmd("GET")
             .arg(&str_key)
             .query_async::<Option<String>>(con)
             .await
             .map(|_| ())
             .map_err(|e| e.to_string()),
+
+        // ----- TTL operations (4%) -----
+        31..=34 => {
+            let op = rng.gen_range(0..4);
+            match op {
+                0 => {
+                    // EXPIRE with random TTL 10-300 seconds
+                    let ttl: u32 = rng.gen_range(10..300);
+                    redis::cmd("EXPIRE")
+                        .arg(&str_key)
+                        .arg(ttl)
+                        .query_async::<i64>(con)
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                }
+                1 => {
+                    // TTL
+                    redis::cmd("TTL")
+                        .arg(&str_key)
+                        .query_async::<i64>(con)
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                }
+                2 => {
+                    // PERSIST
+                    redis::cmd("PERSIST")
+                        .arg(&str_key)
+                        .query_async::<i64>(con)
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                }
+                3 => {
+                    // TYPE
+                    redis::cmd("TYPE")
+                        .arg(&str_key)
+                        .query_async::<String>(con)
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                }
+                _ => unreachable!(),
+            }
+        }
 
         // ----- SET (15%) — with random flags -----
         35..=49 => {

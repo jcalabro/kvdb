@@ -5,6 +5,7 @@
 //! Each command returns a `CommandResponse` that tells the connection
 //! handler whether to continue or close the connection.
 
+pub mod keys;
 pub mod strings;
 
 use bytes::Bytes;
@@ -69,6 +70,24 @@ pub async fn dispatch(cmd: &RedisCommand, state: &mut ConnectionState) -> Comman
         b"STRLEN" => CommandResponse::Reply(strings::handle_strlen(&cmd.args, state).await),
         b"GETRANGE" => CommandResponse::Reply(strings::handle_getrange(&cmd.args, state).await),
         b"SETRANGE" => CommandResponse::Reply(strings::handle_setrange(&cmd.args, state).await),
+        b"TTL" => CommandResponse::Reply(keys::handle_ttl(&cmd.args, state).await),
+        b"PTTL" => CommandResponse::Reply(keys::handle_pttl(&cmd.args, state).await),
+        b"EXPIRETIME" => CommandResponse::Reply(keys::handle_expiretime(&cmd.args, state).await),
+        b"PEXPIRETIME" => CommandResponse::Reply(keys::handle_pexpiretime(&cmd.args, state).await),
+        b"EXPIRE" => CommandResponse::Reply(keys::handle_expire(&cmd.args, state).await),
+        b"PEXPIRE" => CommandResponse::Reply(keys::handle_pexpire(&cmd.args, state).await),
+        b"EXPIREAT" => CommandResponse::Reply(keys::handle_expireat(&cmd.args, state).await),
+        b"PEXPIREAT" => CommandResponse::Reply(keys::handle_pexpireat(&cmd.args, state).await),
+        b"PERSIST" => CommandResponse::Reply(keys::handle_persist(&cmd.args, state).await),
+        b"TYPE" => CommandResponse::Reply(keys::handle_type(&cmd.args, state).await),
+        b"UNLINK" => CommandResponse::Reply(keys::handle_unlink(&cmd.args, state).await),
+        b"TOUCH" => CommandResponse::Reply(keys::handle_touch(&cmd.args, state).await),
+        b"DBSIZE" => CommandResponse::Reply(keys::handle_dbsize(&cmd.args, state).await),
+        b"RENAME" => CommandResponse::Reply(keys::handle_rename(&cmd.args, state).await),
+        b"RENAMENX" => CommandResponse::Reply(keys::handle_renamenx(&cmd.args, state).await),
+        b"SELECT" => CommandResponse::Reply(keys::handle_select(&cmd.args, state).await),
+        b"FLUSHDB" => CommandResponse::Reply(keys::handle_flushdb(&cmd.args, state).await),
+        b"FLUSHALL" => CommandResponse::Reply(keys::handle_flushall(&cmd.args, state).await),
         _ => {
             let name_str = sanitize_for_error(&cmd.name);
             let mut msg = format!("ERR unknown command '{name_str}', with args beginning with:");
