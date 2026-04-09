@@ -38,10 +38,11 @@ pub enum IsolationMode {
 /// in-memory counter, sending a network request) inside the closure.
 ///
 /// `operation` is a label used for Prometheus metrics and tracing
-/// spans (e.g. `"GET"`, `"SET"`, `"HSET"`).
+/// spans (e.g. `"GET"`, `"SET"`, `"HSET"`). Must be a `&'static str`
+/// to avoid per-call allocation for metric labels.
 pub async fn run_transact<F, Fut, T>(
     db: &super::database::Database,
-    operation: &str,
+    operation: &'static str,
     closure: F,
 ) -> Result<T, StorageError>
 where
@@ -53,7 +54,6 @@ where
     async {
         let timer = std::time::Instant::now();
 
-        let op_str = operation.to_owned();
         let result: Result<T, FdbBindingError> = db
             .inner()
             .run(|tr, _maybe_committed| {
@@ -68,7 +68,7 @@ where
         match &result {
             Ok(_) => {
                 FDB_TRANSACTION_DURATION_SECONDS
-                    .with_label_values(&[op_str.as_str(), "committed"])
+                    .with_label_values(&[operation, "committed"])
                     .observe(elapsed);
             }
             Err(e) => {
@@ -78,7 +78,7 @@ where
                     "error"
                 };
                 FDB_TRANSACTION_DURATION_SECONDS
-                    .with_label_values(&[op_str.as_str(), status])
+                    .with_label_values(&[operation, status])
                     .observe(elapsed);
             }
         }

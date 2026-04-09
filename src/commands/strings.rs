@@ -23,14 +23,14 @@ pub async fn handle_get(args: &[Bytes], state: &ConnectionState) -> RespValue {
     if args.len() != 1 {
         return RespValue::err(CommandError::WrongArity { name: "GET".into() }.to_string());
     }
-    let key = args[0].to_vec();
-
     match run_transact(&state.db, "GET", |tr| {
         let dirs = state.dirs.clone();
-        let k = key.clone();
+        let key = args[0].clone();
         async move {
             let now = helpers::now_ms();
-            helpers::get_string(&tr, &dirs, &k, now).await.map_err(helpers::cmd_err)
+            helpers::get_string(&tr, &dirs, &key, now)
+                .await
+                .map_err(helpers::cmd_err)
         }
     })
     .await
@@ -224,20 +224,17 @@ pub async fn handle_set(args: &[Bytes], state: &ConnectionState) -> RespValue {
         Err(resp) => return resp,
     };
 
-    let key = args[0].to_vec();
-    let value = args[1].to_vec();
-
     match run_transact(&state.db, "SET", |tr| {
         let dirs = state.dirs.clone();
-        let k = key.clone();
-        let v = value.clone();
+        let key = args[0].clone();
+        let value = args[1].clone();
         let f = flags.clone();
         async move {
             let now = helpers::now_ms();
 
             // Read existing meta (pass now_ms=0 to see expired keys for KEEPTTL).
             // We need the raw meta for KEEPTTL even if expired.
-            let raw_meta = ObjectMeta::read(&tr, &dirs, &k, 0, false)
+            let raw_meta = ObjectMeta::read(&tr, &dirs, &key, 0, false)
                 .await
                 .map_err(helpers::storage_err)?;
 
@@ -259,7 +256,7 @@ pub async fn handle_set(args: &[Bytes], state: &ConnectionState) -> RespValue {
                         let data = crate::storage::chunking::read_chunks(
                             &tr,
                             &dirs.obj,
-                            &k,
+                            &key,
                             m.num_chunks,
                             m.size_bytes,
                             false,
@@ -295,7 +292,8 @@ pub async fn handle_set(args: &[Bytes], state: &ConnectionState) -> RespValue {
 
             // Write the new string value. Pass the raw_meta (even if
             // expired) so write_string can clean up old data.
-            helpers::write_string(&tr, &dirs, &k, &v, expires_at_ms, raw_meta.as_ref()).map_err(helpers::cmd_err)?;
+            helpers::write_string(&tr, &dirs, &key, &value, expires_at_ms, raw_meta.as_ref())
+                .map_err(helpers::cmd_err)?;
 
             if f.get {
                 Ok(SetResult::WithOldValue(old_value))
@@ -333,15 +331,13 @@ pub async fn handle_del(args: &[Bytes], state: &ConnectionState) -> RespValue {
         return RespValue::err(CommandError::WrongArity { name: "DEL".into() }.to_string());
     }
 
-    let keys: Vec<Vec<u8>> = args.iter().map(|a| a.to_vec()).collect();
-
     match run_transact(&state.db, "DEL", |tr| {
         let dirs = state.dirs.clone();
-        let ks = keys.clone();
+        let keys: Vec<Bytes> = args.to_vec();
         async move {
             let now = helpers::now_ms();
             let mut count: i64 = 0;
-            for k in &ks {
+            for k in &keys {
                 let deleted = helpers::delete_object(&tr, &dirs, k, now)
                     .await
                     .map_err(helpers::cmd_err)?;
@@ -369,15 +365,13 @@ pub async fn handle_exists(args: &[Bytes], state: &ConnectionState) -> RespValue
         return RespValue::err(CommandError::WrongArity { name: "EXISTS".into() }.to_string());
     }
 
-    let keys: Vec<Vec<u8>> = args.iter().map(|a| a.to_vec()).collect();
-
     match run_transact(&state.db, "EXISTS", |tr| {
         let dirs = state.dirs.clone();
-        let ks = keys.clone();
+        let keys: Vec<Bytes> = args.to_vec();
         async move {
             let now = helpers::now_ms();
             let mut count: i64 = 0;
-            for k in &ks {
+            for k in &keys {
                 let meta = ObjectMeta::read(&tr, &dirs, k, now, false)
                     .await
                     .map_err(helpers::storage_err)?;
@@ -405,16 +399,13 @@ pub async fn handle_setnx(args: &[Bytes], state: &ConnectionState) -> RespValue 
         return RespValue::err(CommandError::WrongArity { name: "SETNX".into() }.to_string());
     }
 
-    let key = args[0].to_vec();
-    let value = args[1].to_vec();
-
     match run_transact(&state.db, "SETNX", |tr| {
         let dirs = state.dirs.clone();
-        let k = key.clone();
-        let v = value.clone();
+        let key = args[0].clone();
+        let value = args[1].clone();
         async move {
             let now = helpers::now_ms();
-            let meta = ObjectMeta::read(&tr, &dirs, &k, now, false)
+            let meta = ObjectMeta::read(&tr, &dirs, &key, now, false)
                 .await
                 .map_err(helpers::storage_err)?;
 
@@ -422,7 +413,7 @@ pub async fn handle_setnx(args: &[Bytes], state: &ConnectionState) -> RespValue 
                 return Ok(0i64);
             }
 
-            helpers::write_string(&tr, &dirs, &k, &v, 0, None).map_err(helpers::cmd_err)?;
+            helpers::write_string(&tr, &dirs, &key, &value, 0, None).map_err(helpers::cmd_err)?;
             Ok(1i64)
         }
     })
@@ -448,21 +439,20 @@ pub async fn handle_setex(args: &[Bytes], state: &ConnectionState) -> RespValue 
         Err(resp) => return resp,
     };
 
-    let key = args[0].to_vec();
-    let value = args[2].to_vec();
     let secs = seconds as u64;
 
     match run_transact(&state.db, "SETEX", |tr| {
         let dirs = state.dirs.clone();
-        let k = key.clone();
-        let v = value.clone();
+        let key = args[0].clone();
+        let value = args[2].clone();
         async move {
             let expires_at_ms = helpers::now_ms() + secs * 1000;
-            let raw_meta = ObjectMeta::read(&tr, &dirs, &k, 0, false)
+            let raw_meta = ObjectMeta::read(&tr, &dirs, &key, 0, false)
                 .await
                 .map_err(helpers::storage_err)?;
 
-            helpers::write_string(&tr, &dirs, &k, &v, expires_at_ms, raw_meta.as_ref()).map_err(helpers::cmd_err)?;
+            helpers::write_string(&tr, &dirs, &key, &value, expires_at_ms, raw_meta.as_ref())
+                .map_err(helpers::cmd_err)?;
             Ok(())
         }
     })
@@ -488,21 +478,20 @@ pub async fn handle_psetex(args: &[Bytes], state: &ConnectionState) -> RespValue
         Err(resp) => return resp,
     };
 
-    let key = args[0].to_vec();
-    let value = args[2].to_vec();
     let millis = ms as u64;
 
     match run_transact(&state.db, "PSETEX", |tr| {
         let dirs = state.dirs.clone();
-        let k = key.clone();
-        let v = value.clone();
+        let key = args[0].clone();
+        let value = args[2].clone();
         async move {
             let expires_at_ms = helpers::now_ms() + millis;
-            let raw_meta = ObjectMeta::read(&tr, &dirs, &k, 0, false)
+            let raw_meta = ObjectMeta::read(&tr, &dirs, &key, 0, false)
                 .await
                 .map_err(helpers::storage_err)?;
 
-            helpers::write_string(&tr, &dirs, &k, &v, expires_at_ms, raw_meta.as_ref()).map_err(helpers::cmd_err)?;
+            helpers::write_string(&tr, &dirs, &key, &value, expires_at_ms, raw_meta.as_ref())
+                .map_err(helpers::cmd_err)?;
             Ok(())
         }
     })
@@ -523,22 +512,20 @@ pub async fn handle_getdel(args: &[Bytes], state: &ConnectionState) -> RespValue
         return RespValue::err(CommandError::WrongArity { name: "GETDEL".into() }.to_string());
     }
 
-    let key = args[0].to_vec();
-
     match run_transact(&state.db, "GETDEL", |tr| {
         let dirs = state.dirs.clone();
-        let k = key.clone();
+        let key = args[0].clone();
         async move {
             let now = helpers::now_ms();
 
             // Read the string value first.
-            let data = helpers::get_string(&tr, &dirs, &k, now)
+            let data = helpers::get_string(&tr, &dirs, &key, now)
                 .await
                 .map_err(helpers::cmd_err)?;
 
             // If the key existed, delete it.
             if data.is_some() {
-                helpers::delete_object(&tr, &dirs, &k, now)
+                helpers::delete_object(&tr, &dirs, &key, now)
                     .await
                     .map_err(helpers::cmd_err)?;
             }
@@ -564,22 +551,23 @@ pub async fn handle_mget(args: &[Bytes], state: &ConnectionState) -> RespValue {
         return RespValue::err(CommandError::WrongArity { name: "MGET".into() }.to_string());
     }
 
-    let keys: Vec<Vec<u8>> = args.iter().map(|a| a.to_vec()).collect();
-
     match run_transact(&state.db, "MGET", |tr| {
         let dirs = state.dirs.clone();
-        let ks = keys.clone();
+        let keys: Vec<Bytes> = args.to_vec();
         async move {
             let now = helpers::now_ms();
 
             // Read all metas in parallel.
-            let meta_futures: Vec<_> = ks.iter().map(|k| ObjectMeta::read(&tr, &dirs, k, now, false)).collect();
+            let meta_futures: Vec<_> = keys
+                .iter()
+                .map(|k| ObjectMeta::read(&tr, &dirs, k, now, false))
+                .collect();
             let metas: Vec<Result<Option<ObjectMeta>, _>> = join_all(meta_futures).await;
 
             // Collect keys that need chunk reads, fire those in parallel.
             let mut chunk_futures = Vec::new();
             let mut chunk_indices = Vec::new();
-            let mut results: Vec<Option<Vec<u8>>> = vec![None; ks.len()];
+            let mut results: Vec<Option<Vec<u8>>> = vec![None; keys.len()];
 
             for (i, meta_result) in metas.into_iter().enumerate() {
                 let meta = meta_result.map_err(helpers::storage_err)?;
@@ -591,7 +579,7 @@ pub async fn handle_mget(args: &[Bytes], state: &ConnectionState) -> RespValue {
                     chunk_futures.push(crate::storage::chunking::read_chunks(
                         &tr,
                         &dirs.obj,
-                        &ks[i],
+                        &keys[i],
                         m.num_chunks,
                         m.size_bytes,
                         false,
@@ -634,16 +622,14 @@ pub async fn handle_mset(args: &[Bytes], state: &ConnectionState) -> RespValue {
         return RespValue::err(CommandError::WrongArity { name: "MSET".into() }.to_string());
     }
 
-    let pairs: Vec<(Vec<u8>, Vec<u8>)> = args
-        .chunks(2)
-        .map(|chunk| (chunk[0].to_vec(), chunk[1].to_vec()))
-        .collect();
-
     match run_transact(&state.db, "MSET", |tr| {
         let dirs = state.dirs.clone();
-        let ps = pairs.clone();
+        let pairs: Vec<(Bytes, Bytes)> = args
+            .chunks(2)
+            .map(|chunk| (chunk[0].clone(), chunk[1].clone()))
+            .collect();
         async move {
-            for (k, v) in &ps {
+            for (k, v) in &pairs {
                 let raw_meta = ObjectMeta::read(&tr, &dirs, k, 0, false)
                     .await
                     .map_err(helpers::storage_err)?;
@@ -676,7 +662,7 @@ fn parse_i64_arg(arg: &Bytes) -> Result<i64, RespValue> {
 /// Reads the current value (defaulting to "0" if the key does not exist),
 /// adds `delta`, writes back as a decimal string, and returns the new value.
 /// Preserves existing TTL.
-async fn incr_by_impl(key: Vec<u8>, delta: i64, state: &ConnectionState, cmd_name: &str) -> RespValue {
+async fn incr_by_impl(key: Bytes, delta: i64, state: &ConnectionState, cmd_name: &'static str) -> RespValue {
     match run_transact(&state.db, cmd_name, |tr| {
         let dirs = state.dirs.clone();
         let k = key.clone();
@@ -745,8 +731,7 @@ pub async fn handle_incr(args: &[Bytes], state: &ConnectionState) -> RespValue {
     if args.len() != 1 {
         return RespValue::err(CommandError::WrongArity { name: "INCR".into() }.to_string());
     }
-    let key = args[0].to_vec();
-    incr_by_impl(key, 1, state, "INCR").await
+    incr_by_impl(args[0].clone(), 1, state, "INCR").await
 }
 
 // ---------------------------------------------------------------------------
@@ -758,8 +743,7 @@ pub async fn handle_decr(args: &[Bytes], state: &ConnectionState) -> RespValue {
     if args.len() != 1 {
         return RespValue::err(CommandError::WrongArity { name: "DECR".into() }.to_string());
     }
-    let key = args[0].to_vec();
-    incr_by_impl(key, -1, state, "DECR").await
+    incr_by_impl(args[0].clone(), -1, state, "DECR").await
 }
 
 // ---------------------------------------------------------------------------
@@ -771,12 +755,11 @@ pub async fn handle_incrby(args: &[Bytes], state: &ConnectionState) -> RespValue
     if args.len() != 2 {
         return RespValue::err(CommandError::WrongArity { name: "INCRBY".into() }.to_string());
     }
-    let key = args[0].to_vec();
     let delta = match parse_i64_arg(&args[1]) {
         Ok(v) => v,
         Err(resp) => return resp,
     };
-    incr_by_impl(key, delta, state, "INCRBY").await
+    incr_by_impl(args[0].clone(), delta, state, "INCRBY").await
 }
 
 // ---------------------------------------------------------------------------
@@ -788,7 +771,6 @@ pub async fn handle_decrby(args: &[Bytes], state: &ConnectionState) -> RespValue
     if args.len() != 2 {
         return RespValue::err(CommandError::WrongArity { name: "DECRBY".into() }.to_string());
     }
-    let key = args[0].to_vec();
     let delta = match parse_i64_arg(&args[1]) {
         Ok(v) => v,
         Err(resp) => return resp,
@@ -800,7 +782,7 @@ pub async fn handle_decrby(args: &[Bytes], state: &ConnectionState) -> RespValue
             return RespValue::err("ERR increment or decrement would overflow");
         }
     };
-    incr_by_impl(key, neg_delta, state, "DECRBY").await
+    incr_by_impl(args[0].clone(), neg_delta, state, "DECRBY").await
 }
 
 // ---------------------------------------------------------------------------
@@ -837,7 +819,6 @@ pub async fn handle_incrbyfloat(args: &[Bytes], state: &ConnectionState) -> Resp
         );
     }
 
-    let key = args[0].to_vec();
     let incr_str = match std::str::from_utf8(&args[1]) {
         Ok(s) => s.to_owned(),
         Err(_) => {
@@ -858,7 +839,7 @@ pub async fn handle_incrbyfloat(args: &[Bytes], state: &ConnectionState) -> Resp
 
     match run_transact(&state.db, "INCRBYFLOAT", |tr| {
         let dirs = state.dirs.clone();
-        let k = key.clone();
+        let k = args[0].clone();
         let inc = increment;
         async move {
             let now = helpers::now_ms();
@@ -926,13 +907,10 @@ pub async fn handle_append(args: &[Bytes], state: &ConnectionState) -> RespValue
         return RespValue::err(CommandError::WrongArity { name: "APPEND".into() }.to_string());
     }
 
-    let key = args[0].to_vec();
-    let append_val = args[1].to_vec();
-
     match run_transact(&state.db, "APPEND", |tr| {
         let dirs = state.dirs.clone();
-        let k = key.clone();
-        let av = append_val.clone();
+        let k = args[0].clone();
+        let av = args[1].clone();
         async move {
             let now = helpers::now_ms();
 
@@ -986,11 +964,9 @@ pub async fn handle_strlen(args: &[Bytes], state: &ConnectionState) -> RespValue
         return RespValue::err(CommandError::WrongArity { name: "STRLEN".into() }.to_string());
     }
 
-    let key = args[0].to_vec();
-
     match run_transact(&state.db, "STRLEN", |tr| {
         let dirs = state.dirs.clone();
-        let k = key.clone();
+        let k = args[0].clone();
         async move {
             let now = helpers::now_ms();
             let meta = ObjectMeta::read(&tr, &dirs, &k, now, false)
@@ -1030,8 +1006,6 @@ pub async fn handle_getrange(args: &[Bytes], state: &ConnectionState) -> RespVal
         );
     }
 
-    let key = args[0].to_vec();
-
     let start = match parse_i64_arg(&args[1]) {
         Ok(v) => v,
         Err(resp) => return resp,
@@ -1043,7 +1017,7 @@ pub async fn handle_getrange(args: &[Bytes], state: &ConnectionState) -> RespVal
 
     match run_transact(&state.db, "GETRANGE", |tr| {
         let dirs = state.dirs.clone();
-        let k = key.clone();
+        let k = args[0].clone();
         async move {
             let now = helpers::now_ms();
             let data = helpers::get_string(&tr, &dirs, &k, now)
@@ -1098,8 +1072,6 @@ pub async fn handle_setrange(args: &[Bytes], state: &ConnectionState) -> RespVal
         );
     }
 
-    let key = args[0].to_vec();
-
     let offset = match parse_i64_arg(&args[1]) {
         Ok(v) => v,
         Err(resp) => return resp,
@@ -1110,17 +1082,15 @@ pub async fn handle_setrange(args: &[Bytes], state: &ConnectionState) -> RespVal
     }
     let offset = offset as usize;
 
-    let patch = args[2].to_vec();
-
     // Check 512MB limit.
-    if offset + patch.len() > 536_870_912 {
+    if offset + args[2].len() > 536_870_912 {
         return RespValue::err("ERR string exceeds maximum allowed size");
     }
 
     match run_transact(&state.db, "SETRANGE", |tr| {
         let dirs = state.dirs.clone();
-        let k = key.clone();
-        let p = patch.clone();
+        let k = args[0].clone();
+        let p = args[2].clone();
         let off = offset;
         async move {
             let now = helpers::now_ms();
