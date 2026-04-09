@@ -5,6 +5,7 @@
 //! Each command returns a `CommandResponse` that tells the connection
 //! handler whether to continue or close the connection.
 
+pub mod keys;
 pub mod strings;
 
 use bytes::Bytes;
@@ -69,6 +70,10 @@ pub async fn dispatch(cmd: &RedisCommand, state: &mut ConnectionState) -> Comman
         b"STRLEN" => CommandResponse::Reply(strings::handle_strlen(&cmd.args, state).await),
         b"GETRANGE" => CommandResponse::Reply(strings::handle_getrange(&cmd.args, state).await),
         b"SETRANGE" => CommandResponse::Reply(strings::handle_setrange(&cmd.args, state).await),
+        b"TTL" => CommandResponse::Reply(keys::handle_ttl(&cmd.args, state).await),
+        b"PTTL" => CommandResponse::Reply(keys::handle_pttl(&cmd.args, state).await),
+        b"EXPIRETIME" => CommandResponse::Reply(keys::handle_expiretime(&cmd.args, state).await),
+        b"PEXPIRETIME" => CommandResponse::Reply(keys::handle_pexpiretime(&cmd.args, state).await),
         _ => {
             let name_str = sanitize_for_error(&cmd.name);
             let mut msg = format!("ERR unknown command '{name_str}', with args beginning with:");

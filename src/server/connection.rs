@@ -217,6 +217,10 @@ fn metric_label_for_command(name: &[u8]) -> &'static str {
         b"STRLEN" => "STRLEN",
         b"GETRANGE" => "GETRANGE",
         b"SETRANGE" => "SETRANGE",
+        b"TTL" => "TTL",
+        b"PTTL" => "PTTL",
+        b"EXPIRETIME" => "EXPIRETIME",
+        b"PEXPIRETIME" => "PEXPIRETIME",
         _ => "UNKNOWN",
     }
 }
