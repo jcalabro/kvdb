@@ -13,6 +13,7 @@ use crate::server::connection::ConnectionState;
 
 /// Result of dispatching a command.
 #[derive(Debug)]
+#[must_use]
 pub enum CommandResponse {
     /// Send the response and continue processing commands.
     Reply(RespValue),
@@ -31,7 +32,7 @@ pub fn dispatch(cmd: &RedisCommand, state: &mut ConnectionState) -> CommandRespo
         b"ECHO" => CommandResponse::Reply(handle_echo(&cmd.args)),
         b"HELLO" => CommandResponse::Reply(handle_hello(&cmd.args, state)),
         b"QUIT" => CommandResponse::Close(RespValue::ok()),
-        b"COMMAND" => handle_command(&cmd.args),
+        b"COMMAND" => CommandResponse::Reply(handle_command(&cmd.args)),
         b"CLIENT" => CommandResponse::Reply(handle_client(&cmd.args)),
         _ => {
             let name_str = String::from_utf8_lossy(&cmd.name);
@@ -120,13 +121,13 @@ fn handle_hello(args: &[Bytes], state: &mut ConnectionState) -> RespValue {
 /// COMMAND [subcommand]
 ///
 /// Minimal stubs for client library handshake.
-fn handle_command(args: &[Bytes]) -> CommandResponse {
+fn handle_command(args: &[Bytes]) -> RespValue {
     if args.is_empty() {
-        return CommandResponse::Reply(RespValue::Array(Some(vec![])));
+        return RespValue::Array(Some(vec![]));
     }
 
     let subcmd = args[0].to_ascii_uppercase();
-    CommandResponse::Reply(match subcmd.as_slice() {
+    match subcmd.as_slice() {
         b"COUNT" => RespValue::Integer(0),
         b"DOCS" => RespValue::Map(vec![]),
         b"LIST" => RespValue::Array(Some(vec![])),
@@ -135,7 +136,7 @@ fn handle_command(args: &[Bytes]) -> CommandResponse {
             "ERR unknown subcommand or wrong number of arguments for 'COMMAND|{}' command",
             String::from_utf8_lossy(&subcmd)
         )),
-    })
+    }
 }
 
 /// CLIENT [subcommand]

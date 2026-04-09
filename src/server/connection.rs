@@ -129,11 +129,13 @@ fn dispatch_one(value: RespValue, state: &mut ConnectionState, write_buf: &mut B
             };
 
             let status = if matches!(response, RespValue::Error(_)) {
-                "err".to_owned()
+                "err"
             } else {
-                "ok".to_owned()
+                "ok"
             };
-            metrics::COMMANDS_TOTAL.with_label_values(&[&cmd_name, &status]).inc();
+            metrics::COMMANDS_TOTAL
+                .with_label_values(&[cmd_name.as_str(), status])
+                .inc();
 
             encoder::encode_into(write_buf, &response, state.protocol_version);
             timer.observe_duration();
