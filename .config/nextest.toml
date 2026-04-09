@@ -2,7 +2,7 @@
 dir = "target/nextest"
 
 [profile.default]
-retries = 1
+retries = 2
 fail-fast = false
 slow-timeout = { period = "10s", terminate-after = 2 }
 

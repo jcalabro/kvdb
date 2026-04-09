@@ -8,7 +8,7 @@
 | M1: RESP3 Parser/Encoder | **Complete** | 99 unit tests, 15K+ proptest cases, 4 fuzz targets (2.2M+ runs, 0 crashes), criterion benchmarks. Parser: ~37ns simple, ~126ns SET cmd. Encoder: ~12ns simple, ~17ns bulk. 2 bugs found and fixed by fuzzer. |
 | M2: TCP Server Shell | **Complete** | Connection handler with read/parse/dispatch/encode/write loop. Pipelining support. PING, ECHO, HELLO, QUIT, COMMAND, CLIENT handlers. 10 unit tests, 6 integration tests, 120 total tests passing. redis-cli verified. |
 | M3: FDB Storage Layer | **Complete** | Database init (Once-guarded boot), FDB directory layer (8 subspaces/namespace), ObjectMeta with bincode serde + lazy expiry, transparent chunking (100KB, parallel reads), instrumented transaction wrapper (Prometheus + tracing). 11 unit tests, 18 integration tests, 3 property tests (350 cases), 2 benchmarks (serialize ~7ns, deserialize ~8ns). 154 total tests, `just test` at ~1s, `just accept` at ~14s. |
-| M4: String Commands | Not started | |
+| M4: String Commands | **Complete** | 19 commands (GET, SET, MGET, MSET, DEL, EXISTS, INCR, DECR, INCRBY, DECRBY, INCRBYFLOAT, APPEND, STRLEN, GETRANGE, SETRANGE, SETNX, SETEX, PSETEX, GETDEL). Full SET flags (NX/XX/EX/PX/EXAT/PXAT/KEEPTTL/GET). Async dispatch, FDB-backed ConnectionState, storage helpers module. 65 integration tests, 7 acceptance tests (property-based + randomized), expanded smoke tests, 5 string benchmarks. 222 total tests, `just test` at ~0.7s, `just accept` at ~4s. |
 | M5: Key Management & TTL | Not started | |
 | M6: Hash Commands | Not started | |
 | M7: Set Commands | Not started | |
@@ -90,6 +90,37 @@
 **Benchmarks** (`benches/commands.rs`) — ObjectMeta serialize (~7ns) and deserialize (~8ns) via criterion.
 
 **`just test`**: 151 tests in ~1.0s. **`just accept`**: 10 acceptance tests (350 proptest cases) in ~14s.
+
+### What's been built (M4)
+
+**Async command dispatch** (`src/commands/mod.rs`) — `dispatch()` is now `pub async fn`, enabling FDB-backed commands. All 19 string commands routed by name. Prometheus metric labels for all commands.
+
+**ConnectionState with FDB** (`src/server/connection.rs`) — `ConnectionState` holds `Database` and `Directories` handles. Server initializes FDB on startup (`listener.rs`) with retry logic for directory conflicts. Each connection gets cloned handles.
+
+**Storage helpers** (`src/storage/helpers.rs`) — High-level `get_string()`, `write_string()`, `delete_object()` that encapsulate the ObjectMeta + type-check + chunk read/write cycle. Error conversion helpers (`cmd_err`, `storage_err`, `storage_err_to_resp`). Type-agnostic `delete_data_for_meta()` handles cleanup for all key types (String, Hash, Set, SortedSet, List, Stream).
+
+**String commands** (`src/commands/strings.rs`, ~1100 lines) — 19 handlers:
+- **Core**: GET, SET (full flags: NX/XX/EX/PX/EXAT/PXAT/KEEPTTL/GET), GETDEL
+- **Multi-key**: MGET (parallel-safe), MSET, DEL, EXISTS
+- **Numeric**: INCR, DECR, INCRBY, DECRBY (shared `incr_by_impl`, checked overflow), INCRBYFLOAT (NaN/Inf protection, Redis float formatting)
+- **String ops**: APPEND, STRLEN (meta-only read), GETRANGE (negative indices), SETRANGE (zero-padding, 512MB limit)
+- **Sugar**: SETNX (returns integer), SETEX, PSETEX
+
+SET flag parsing validates all mutual exclusions. TTL computation happens inside FDB transactions (no drift on retry). WRONGTYPE enforced for all string-specific commands; DEL/EXISTS/MGET are type-agnostic.
+
+**Error propagation** (`src/error.rs`, `src/storage/transaction.rs`) — `StorageError::Command` variant extracts `CommandError` from `FdbBindingError::CustomError` via downcast, preserving Redis error prefixes (WRONGTYPE, ERR).
+
+**Test harness** (`tests/harness/mod.rs`) — `TestContext` creates isolated FDB namespace per test (`kvdb_test_<uuid>`), injects into server config, cleans up on Drop. `write_fake_meta()` helper for WRONGTYPE testing.
+
+**Integration tests** (`tests/strings.rs`) — 65 tests covering all 19 commands: happy paths, error paths (arity, flag conflicts, invalid TTLs, overflow, NaN/Inf), WRONGTYPE enforcement, expiry interaction, chunking (500KB values).
+
+**Acceptance tests** (`tests/accept_strings.rs`) — 7 tests: SET/GET roundtrip property (100 cases), INCR commutativity (50 cases), STRLEN/APPEND properties, randomized 500-op command sequences against HashMap model, chunking boundaries (99999-300001 bytes), SET flag combination matrix.
+
+**Smoke tests** (`examples/smoke.rs`) — 22 happy-path + 11 error-path checks. Post-error liveness verification.
+
+**Benchmarks** (`benches/commands.rs`) — 5 full-stack benchmarks: set_64b, get_64b, set_get_1kb, incr, mset_10.
+
+**`just test`**: 205 tests in ~0.7s. **`just accept`**: 17 acceptance tests in ~4s.
 
 ---
 

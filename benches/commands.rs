@@ -1,17 +1,23 @@
-//! Criterion benchmarks for RESP protocol parsing and encoding.
+//! Criterion benchmarks for RESP protocol parsing, encoding, and
+//! full-stack string command latency.
 //!
 //! Run with `just bench` or `cargo bench`.
 //!
-//! These benchmarks measure the hot path: parsing client commands and
-//! encoding server responses. The parser/encoder run on every single
-//! request, so even small improvements here compound at scale.
+//! These benchmarks measure:
+//! - The hot path: parsing client commands and encoding server responses.
+//! - Full-stack latency: client -> RESP parse -> dispatch -> FDB transaction -> response encode.
+
+use std::net::SocketAddr;
 
 use bytes::{Bytes, BytesMut};
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use tokio::runtime::Runtime;
 
+use kvdb::config::ServerConfig;
 use kvdb::protocol::encoder::encode;
 use kvdb::protocol::parser::parse;
 use kvdb::protocol::types::RespValue;
+use kvdb::storage::database::Database;
 use kvdb::storage::meta::{KeyType, ObjectMeta};
 
 // ---------------------------------------------------------------------------
@@ -231,6 +237,167 @@ fn bench_meta_serialize(c: &mut Criterion) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Full-stack string command benchmarks
+// ---------------------------------------------------------------------------
+//
+// These benchmarks measure the full round-trip latency of string commands:
+// client → RESP parse → dispatch → FDB transaction → response encode.
+//
+// A single kvdb server is started once for all benchmarks using a dedicated
+// tokio runtime and an isolated FDB namespace.
+
+/// Start a kvdb server on a random port with an isolated FDB namespace.
+/// Returns the bound address, a shutdown sender, and the server task handle.
+async fn start_bench_server() -> (
+    SocketAddr,
+    tokio::sync::broadcast::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = probe.local_addr().unwrap();
+    drop(probe);
+
+    let root_prefix = format!("kvdb_bench_{}", uuid::Uuid::new_v4());
+    let db = Database::new("fdb.cluster").expect("failed to open FDB — is `just up` running?");
+
+    let mut config = ServerConfig::default();
+    config.bind_addr = addr;
+    config.db = Some(db);
+    config.root_prefix = Some(root_prefix);
+    // Suppress noisy server logs during benchmarks.
+    config.log_level = "warn".into();
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
+
+    let handle = tokio::spawn(async move {
+        let _ = kvdb::server::listener::run(config, shutdown_rx).await;
+    });
+
+    // Poll until the server accepts connections.
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+    loop {
+        if tokio::time::Instant::now() > deadline {
+            panic!("bench server did not start within 5 seconds on {addr}");
+        }
+        match tokio::net::TcpStream::connect(addr).await {
+            Ok(_) => break,
+            Err(_) => tokio::time::sleep(tokio::time::Duration::from_millis(5)).await,
+        }
+    }
+
+    (addr, shutdown_tx, handle)
+}
+
+fn bench_string_commands(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+
+    let (addr, _shutdown_tx, _handle) = rt.block_on(start_bench_server());
+
+    let client = redis::Client::open(format!("redis://{addr}")).unwrap();
+    let mut con = rt.block_on(async { client.get_multiplexed_async_connection().await.unwrap() });
+
+    let mut group = c.benchmark_group("string");
+
+    // 1. SET of a 64-byte value.
+    group.bench_function("set_64b", |b| {
+        let mut i = 0u64;
+        b.iter(|| {
+            let key = format!("bench_set_{i}");
+            i += 1;
+            rt.block_on(async {
+                let _: () = redis::cmd("SET")
+                    .arg(&key)
+                    .arg(&[0u8; 64][..])
+                    .query_async(&mut con)
+                    .await
+                    .unwrap();
+            });
+        });
+    });
+
+    // 2. GET of a 64-byte value (pre-populated).
+    rt.block_on(async {
+        let _: () = redis::cmd("SET")
+            .arg("bench_get_target")
+            .arg(&[0u8; 64][..])
+            .query_async(&mut con)
+            .await
+            .unwrap();
+    });
+
+    group.bench_function("get_64b", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                let _: Vec<u8> = redis::cmd("GET")
+                    .arg("bench_get_target")
+                    .query_async(&mut con)
+                    .await
+                    .unwrap();
+            });
+        });
+    });
+
+    // 3. SET + GET of a 1KB value.
+    let value_1kb = vec![b'x'; 1024];
+    group.bench_function("set_get_1kb", |b| {
+        let mut i = 0u64;
+        b.iter(|| {
+            let key = format!("bench_sg_{i}");
+            i += 1;
+            rt.block_on(async {
+                let _: () = redis::cmd("SET")
+                    .arg(&key)
+                    .arg(&value_1kb[..])
+                    .query_async(&mut con)
+                    .await
+                    .unwrap();
+                let _: Vec<u8> = redis::cmd("GET").arg(&key).query_async(&mut con).await.unwrap();
+            });
+        });
+    });
+
+    // 4. INCR on an existing counter.
+    rt.block_on(async {
+        let _: () = redis::cmd("SET")
+            .arg("bench_incr_ctr")
+            .arg("0")
+            .query_async(&mut con)
+            .await
+            .unwrap();
+    });
+
+    group.bench_function("incr", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                let _: i64 = redis::cmd("INCR")
+                    .arg("bench_incr_ctr")
+                    .query_async(&mut con)
+                    .await
+                    .unwrap();
+            });
+        });
+    });
+
+    // 5. MSET of 10 key-value pairs.
+    group.bench_function("mset_10", |b| {
+        let mut i = 0u64;
+        b.iter(|| {
+            let mut cmd = redis::cmd("MSET");
+            for j in 0..10u64 {
+                cmd.arg(format!("bench_mset_{i}_{j}"));
+                cmd.arg(&[b'v'; 64][..]);
+            }
+            i += 1;
+            rt.block_on(async {
+                let _: () = cmd.query_async(&mut con).await.unwrap();
+            });
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     // Fast feedback: 500ms warmup + 1.5s measurement × 30 samples.
@@ -255,5 +422,6 @@ criterion_group! {
         bench_encode_resp2_downgrade,
         bench_roundtrip,
         bench_meta_serialize,
+        bench_string_commands,
 }
 criterion_main!(benches);

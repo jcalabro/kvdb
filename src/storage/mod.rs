@@ -6,6 +6,7 @@
 pub mod chunking;
 pub mod database;
 pub mod directories;
+pub mod helpers;
 pub mod meta;
 pub mod transaction;
 

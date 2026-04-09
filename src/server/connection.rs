@@ -19,6 +19,7 @@ use crate::commands::{self, CommandResponse};
 use crate::observability::metrics;
 use crate::protocol::types::{RedisCommand, RespValue};
 use crate::protocol::{encoder, parser};
+use crate::storage::{Database, Directories};
 
 /// Initial capacity for per-connection read and write buffers.
 const INITIAL_BUF_CAPACITY: usize = 8 * 1024;
@@ -36,22 +37,66 @@ const MAX_READ_BUF_SIZE: usize = 64 * 1024 * 1024;
 
 /// Per-connection state.
 ///
-/// Tracks the negotiated protocol version and selected database.
-/// Passed to command handlers so they can read/modify connection
-/// properties (e.g. HELLO upgrades protocol_version, SELECT
-/// changes selected_db).
+/// Tracks the negotiated protocol version, selected database, and FDB
+/// handles. Passed to command handlers so they can read/modify connection
+/// properties and access the storage layer.
 pub struct ConnectionState {
     /// RESP protocol version (2 or 3). Starts at 2; upgraded via HELLO.
     pub protocol_version: u8,
     /// Currently selected database namespace (0-15).
     pub selected_db: u8,
+    /// FDB database handle.
+    pub db: Database,
+    /// FDB directory subspaces for the current namespace.
+    pub dirs: Directories,
 }
 
-impl Default for ConnectionState {
-    fn default() -> Self {
+impl ConnectionState {
+    /// Create a new connection state with the given FDB handles.
+    pub fn new(db: Database, dirs: Directories) -> Self {
         Self {
             protocol_version: 2,
             selected_db: 0,
+            db,
+            dirs,
+        }
+    }
+
+    /// Create a stub connection state for unit tests that don't need FDB.
+    ///
+    /// Lazily initializes a real FDB `Database` and `Directories` once per
+    /// process using a shared `OnceLock`. This is safe because `boot()` is
+    /// idempotent and tests share the cluster file.
+    #[cfg(test)]
+    pub fn default_for_test() -> Self {
+        use std::sync::OnceLock;
+
+        static TEST_FDB: OnceLock<(Database, Directories)> = OnceLock::new();
+
+        let (db, dirs) = TEST_FDB.get_or_init(|| {
+            // Spawn a dedicated thread for initialization to avoid
+            // "cannot start a runtime from within a runtime" when
+            // called inside #[tokio::test].
+            std::thread::spawn(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let db = Database::new("fdb.cluster").expect("failed to open FDB for tests");
+                let dirs = rt
+                    .block_on(Directories::open(&db, 0, "kvdb_test_unit"))
+                    .expect("failed to open directories for tests");
+                (db, dirs)
+            })
+            .join()
+            .expect("test FDB init thread panicked")
+        });
+
+        Self {
+            protocol_version: 2,
+            selected_db: 0,
+            db: db.clone(),
+            dirs: dirs.clone(),
         }
     }
 }
@@ -62,12 +107,12 @@ impl Default for ConnectionState {
 /// responses back. Supports pipelining (multiple commands buffered
 /// before flushing). Returns when the client disconnects or QUIT is
 /// received.
-pub async fn handle(mut socket: TcpStream, addr: SocketAddr) -> anyhow::Result<()> {
+pub async fn handle(mut socket: TcpStream, addr: SocketAddr, db: Database, dirs: Directories) -> anyhow::Result<()> {
     debug!(%addr, "new connection");
     metrics::ACTIVE_CONNECTIONS.inc();
     metrics::CONNECTIONS_TOTAL.with_label_values(&["accepted"]).inc();
 
-    let result = run_loop(&mut socket, addr).await;
+    let result = run_loop(&mut socket, addr, db, dirs).await;
 
     metrics::ACTIVE_CONNECTIONS.dec();
     debug!(%addr, "connection closed");
@@ -79,8 +124,8 @@ pub async fn handle(mut socket: TcpStream, addr: SocketAddr) -> anyhow::Result<(
 ///
 /// Separated from `handle()` so metrics bookkeeping happens exactly
 /// once regardless of how the loop exits.
-async fn run_loop(socket: &mut TcpStream, addr: SocketAddr) -> anyhow::Result<()> {
-    let mut state = ConnectionState::default();
+async fn run_loop(socket: &mut TcpStream, addr: SocketAddr, db: Database, dirs: Directories) -> anyhow::Result<()> {
+    let mut state = ConnectionState::new(db, dirs);
     let mut read_buf = BytesMut::with_capacity(INITIAL_BUF_CAPACITY);
     let mut write_buf = BytesMut::with_capacity(INITIAL_BUF_CAPACITY);
 
@@ -96,7 +141,7 @@ async fn run_loop(socket: &mut TcpStream, addr: SocketAddr) -> anyhow::Result<()
         loop {
             match parser::parse(&mut read_buf) {
                 Ok(Some(value)) => {
-                    if dispatch_one(value, &mut state, &mut write_buf) {
+                    if dispatch_one(value, &mut state, &mut write_buf).await {
                         should_close = true;
                     }
                 }
@@ -135,7 +180,25 @@ fn metric_label_for_command(name: &[u8]) -> &'static str {
         b"QUIT" => "QUIT",
         b"COMMAND" => "COMMAND",
         b"CLIENT" => "CLIENT",
-        // Future commands added here as they're implemented
+        b"GET" => "GET",
+        b"SET" => "SET",
+        b"DEL" => "DEL",
+        b"EXISTS" => "EXISTS",
+        b"SETNX" => "SETNX",
+        b"SETEX" => "SETEX",
+        b"PSETEX" => "PSETEX",
+        b"GETDEL" => "GETDEL",
+        b"MGET" => "MGET",
+        b"MSET" => "MSET",
+        b"INCR" => "INCR",
+        b"DECR" => "DECR",
+        b"INCRBY" => "INCRBY",
+        b"DECRBY" => "DECRBY",
+        b"INCRBYFLOAT" => "INCRBYFLOAT",
+        b"APPEND" => "APPEND",
+        b"STRLEN" => "STRLEN",
+        b"GETRANGE" => "GETRANGE",
+        b"SETRANGE" => "SETRANGE",
         _ => "UNKNOWN",
     }
 }
@@ -143,7 +206,7 @@ fn metric_label_for_command(name: &[u8]) -> &'static str {
 /// Dispatch a single parsed RESP value as a command.
 ///
 /// Returns `true` if the connection should be closed after flushing.
-fn dispatch_one(value: RespValue, state: &mut ConnectionState, write_buf: &mut BytesMut) -> bool {
+async fn dispatch_one(value: RespValue, state: &mut ConnectionState, write_buf: &mut BytesMut) -> bool {
     match RedisCommand::from_resp(value) {
         Ok(cmd) => {
             let label = metric_label_for_command(&cmd.name);
@@ -151,7 +214,7 @@ fn dispatch_one(value: RespValue, state: &mut ConnectionState, write_buf: &mut B
                 .with_label_values(&[label])
                 .start_timer();
 
-            let (response, close) = match commands::dispatch(&cmd, state) {
+            let (response, close) = match commands::dispatch(&cmd, state).await {
                 CommandResponse::Reply(resp) => (resp, false),
                 CommandResponse::Close(resp) => (resp, true),
             };

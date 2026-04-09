@@ -193,6 +193,237 @@ async fn main() -> ExitCode {
         }
     }
 
+    // ── String Commands ───────────────────────────────────────────
+    println!("String Commands");
+
+    let result: redis::RedisResult<String> = redis::cmd("SET")
+        .arg("greeting")
+        .arg("hello world")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("SET greeting", result, "OK".to_string());
+
+    let result: redis::RedisResult<String> = redis::cmd("GET").arg("greeting").query_async(&mut con).await;
+    t.check_eq("GET greeting", result, "hello world".to_string());
+
+    let result: redis::RedisResult<String> = redis::cmd("SET").arg("counter").arg("0").query_async(&mut con).await;
+    t.check_eq("SET counter 0", result, "OK".to_string());
+
+    let result: redis::RedisResult<i64> = redis::cmd("INCR").arg("counter").query_async(&mut con).await;
+    t.check_eq("INCR counter", result, 1);
+
+    let result: redis::RedisResult<i64> = redis::cmd("INCRBY")
+        .arg("counter")
+        .arg("41")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("INCRBY counter 41", result, 42);
+
+    let result: redis::RedisResult<String> = redis::cmd("GET").arg("counter").query_async(&mut con).await;
+    t.check_eq("GET counter after INCRBY", result, "42".to_string());
+
+    let result: redis::RedisResult<i64> = redis::cmd("DECR").arg("counter").query_async(&mut con).await;
+    t.check_eq("DECR counter", result, 41);
+
+    let result: redis::RedisResult<i64> = redis::cmd("DECRBY")
+        .arg("counter")
+        .arg("40")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("DECRBY counter 40", result, 1);
+
+    let result: redis::RedisResult<i64> = redis::cmd("APPEND")
+        .arg("greeting")
+        .arg(" from kvdb")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("APPEND greeting", result, 21);
+
+    let result: redis::RedisResult<String> = redis::cmd("GET").arg("greeting").query_async(&mut con).await;
+    t.check_eq("GET greeting after APPEND", result, "hello world from kvdb".to_string());
+
+    let result: redis::RedisResult<i64> = redis::cmd("STRLEN").arg("greeting").query_async(&mut con).await;
+    t.check_eq("STRLEN greeting", result, 21);
+
+    let result: redis::RedisResult<String> = redis::cmd("GETRANGE")
+        .arg("greeting")
+        .arg("0")
+        .arg("4")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("GETRANGE greeting 0 4", result, "hello".to_string());
+
+    let result: redis::RedisResult<i64> = redis::cmd("SETRANGE")
+        .arg("greeting")
+        .arg("0")
+        .arg("HELLO")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("SETRANGE greeting 0 HELLO", result, 21);
+
+    let result: redis::RedisResult<String> = redis::cmd("GET").arg("greeting").query_async(&mut con).await;
+    t.check_eq(
+        "GET greeting after SETRANGE",
+        result,
+        "HELLO world from kvdb".to_string(),
+    );
+
+    let result: redis::RedisResult<String> = redis::cmd("MSET")
+        .arg("a")
+        .arg("1")
+        .arg("b")
+        .arg("2")
+        .arg("c")
+        .arg("3")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("MSET a 1 b 2 c 3", result, "OK".to_string());
+
+    let result: redis::RedisResult<Vec<Option<String>>> = redis::cmd("MGET")
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .query_async(&mut con)
+        .await;
+    t.check_eq(
+        "MGET a b c",
+        result,
+        vec![Some("1".to_string()), Some("2".to_string()), Some("3".to_string())],
+    );
+
+    let result: redis::RedisResult<i64> = redis::cmd("SETNX")
+        .arg("newkey")
+        .arg("value")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("SETNX newkey (new)", result, 1);
+
+    let result: redis::RedisResult<i64> = redis::cmd("SETNX")
+        .arg("newkey")
+        .arg("other")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("SETNX newkey (existing)", result, 0);
+
+    let result: redis::RedisResult<i64> = redis::cmd("DEL")
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .arg("newkey")
+        .arg("greeting")
+        .arg("counter")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("DEL a b c newkey greeting counter", result, 6);
+
+    let result: redis::RedisResult<i64> = redis::cmd("EXISTS")
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("EXISTS a b c (all deleted)", result, 0);
+
+    let result: redis::RedisResult<String> = redis::cmd("INCRBYFLOAT")
+        .arg("pi")
+        .arg("3.14159")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("INCRBYFLOAT pi 3.14159", result, "3.14159".to_string());
+
+    let result: redis::RedisResult<i64> = redis::cmd("DEL").arg("pi").query_async(&mut con).await;
+    t.check_eq("DEL pi", result, 1);
+
+    // GETDEL: set a key, then getdel it, then verify it's gone
+    let _: redis::RedisResult<String> = redis::cmd("SET")
+        .arg("tempkey")
+        .arg("tempval")
+        .query_async(&mut con)
+        .await;
+
+    let result: redis::RedisResult<String> = redis::cmd("GETDEL").arg("tempkey").query_async(&mut con).await;
+    t.check_eq("GETDEL tempkey returns value", result, "tempval".to_string());
+
+    let result: redis::RedisResult<i64> = redis::cmd("EXISTS").arg("tempkey").query_async(&mut con).await;
+    t.check_eq("GETDEL tempkey is gone", result, 0);
+
+    // ── String Error Handling ─────────────────────────────────────
+    println!("String Error Handling");
+
+    let result: redis::RedisResult<String> = redis::cmd("GET").query_async(&mut con).await;
+    t.check_err("GET no args", result);
+
+    let result: redis::RedisResult<String> = redis::cmd("GET").arg("a").arg("b").query_async(&mut con).await;
+    t.check_err("GET too many args", result);
+
+    let result: redis::RedisResult<String> = redis::cmd("SET").query_async(&mut con).await;
+    t.check_err("SET no args", result);
+
+    let result: redis::RedisResult<String> = redis::cmd("SET").arg("onlykey").query_async(&mut con).await;
+    t.check_err("SET only key", result);
+
+    let result: redis::RedisResult<String> = redis::cmd("SET")
+        .arg("key")
+        .arg("val")
+        .arg("NX")
+        .arg("XX")
+        .query_async(&mut con)
+        .await;
+    t.check_err("SET key val NX XX", result);
+
+    let result: redis::RedisResult<String> = redis::cmd("SET")
+        .arg("key")
+        .arg("val")
+        .arg("EX")
+        .arg("0")
+        .query_async(&mut con)
+        .await;
+    t.check_err("SET key val EX 0", result);
+
+    let result: redis::RedisResult<String> = redis::cmd("SET")
+        .arg("key")
+        .arg("val")
+        .arg("EX")
+        .arg("-5")
+        .query_async(&mut con)
+        .await;
+    t.check_err("SET key val EX -5", result);
+
+    let result: redis::RedisResult<String> = redis::cmd("SET")
+        .arg("key")
+        .arg("val")
+        .arg("EX")
+        .arg("notanumber")
+        .query_async(&mut con)
+        .await;
+    t.check_err("SET key val EX notanumber", result);
+
+    let result: redis::RedisResult<String> = redis::cmd("SET")
+        .arg("key")
+        .arg("val")
+        .arg("BADOPTION")
+        .query_async(&mut con)
+        .await;
+    t.check_err("SET key val BADOPTION", result);
+
+    let result: redis::RedisResult<String> = redis::cmd("MSET").arg("a").query_async(&mut con).await;
+    t.check_err("MSET odd args", result);
+
+    let result: redis::RedisResult<i64> = redis::cmd("DEL").query_async(&mut con).await;
+    t.check_err("DEL no args", result);
+
+    let result: redis::RedisResult<i64> = redis::cmd("SETRANGE")
+        .arg("key")
+        .arg("-1")
+        .arg("x")
+        .query_async(&mut con)
+        .await;
+    t.check_err("SETRANGE negative offset", result);
+
+    // ── Post-error liveness check ─────────────────────────────────
+    let result: redis::RedisResult<String> = redis::cmd("PING").query_async(&mut con).await;
+    t.check_eq("server alive after errors", result, "PONG".to_string());
+
     // ── QUIT (open a separate connection for this) ─────────────
     println!("QUIT");
 

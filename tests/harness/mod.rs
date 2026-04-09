@@ -19,11 +19,15 @@
 //! - **Isolated**: each test gets its own server port and FDB namespace.
 //! - **Fast startup**: server binds in <50ms; harness polls until ready.
 //! - **Real client**: uses `redis` crate (redis-rs) — validates wire protocol.
-//! - **FDB optional at M0**: server starts in stub mode until M3 wires FDB.
+//! - **FDB cleanup**: each test namespace is removed on drop.
 
 use std::net::SocketAddr;
 
+use foundationdb::directory::{Directory, DirectoryLayer};
+use uuid::Uuid;
+
 use kvdb::config::ServerConfig;
+use kvdb::storage::database::Database;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
@@ -38,6 +42,10 @@ pub struct TestContext {
     shutdown_tx: Option<broadcast::Sender<()>>,
     /// Server task handle.
     _server_handle: JoinHandle<()>,
+    /// FDB database handle for cleanup.
+    db: Database,
+    /// The root prefix used for this test's FDB namespace.
+    root_prefix: String,
 }
 
 impl TestContext {
@@ -56,6 +64,13 @@ impl TestContext {
         drop(probe);
 
         config.bind_addr = addr;
+
+        // Create an isolated FDB namespace for this test.
+        let root_prefix = format!("kvdb_test_{}", Uuid::new_v4());
+        let db = Database::new(&config.fdb_cluster_file).expect("failed to open FDB — is `just up` running?");
+
+        config.db = Some(db.clone());
+        config.root_prefix = Some(root_prefix.clone());
 
         let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
 
@@ -86,12 +101,37 @@ impl TestContext {
             client,
             shutdown_tx: Some(shutdown_tx),
             _server_handle: server_handle,
+            db,
+            root_prefix,
         }
     }
 
     /// Get a fresh async multiplexed connection to the test server.
     pub async fn connection(&self) -> redis::aio::MultiplexedConnection {
         self.client.get_multiplexed_async_connection().await.unwrap()
+    }
+
+    /// Write a raw ObjectMeta entry for testing WRONGTYPE enforcement.
+    /// Creates a key with the given type but no actual data.
+    pub async fn write_fake_meta(&self, key: &str, key_type: kvdb::storage::KeyType) {
+        use kvdb::storage::{Directories, ObjectMeta};
+
+        let dirs = Directories::open(&self.db, 0, &self.root_prefix).await.unwrap();
+
+        let trx = self.db.inner().create_trx().unwrap();
+        let meta = ObjectMeta {
+            key_type,
+            num_chunks: 0,
+            size_bytes: 0,
+            expires_at_ms: 0,
+            cardinality: 0,
+            last_accessed_ms: 0,
+            list_head: 0,
+            list_tail: 0,
+            list_length: 0,
+        };
+        meta.write(&trx, &dirs, key.as_bytes()).unwrap();
+        trx.commit().await.unwrap();
     }
 }
 
@@ -101,5 +141,24 @@ impl Drop for TestContext {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
+
+        // Best-effort cleanup of the test FDB namespace.
+        let db = self.db.clone();
+        let root = self.root_prefix.clone();
+        // Use a temporary runtime for cleanup since Drop is synchronous.
+        // This is safe because the server task is on the main tokio runtime
+        // and we only need a brief transaction to remove the directory.
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let trx = db.inner().create_trx().unwrap();
+                let dir_layer = DirectoryLayer::default();
+                let _ = dir_layer.remove(&trx, &[root]).await;
+                let _ = trx.commit().await;
+            });
+        });
     }
 }

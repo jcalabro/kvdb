@@ -9,6 +9,7 @@ use std::net::SocketAddr;
 use clap::Parser;
 
 use crate::observability::{LogFormat, ObservabilityConfig};
+use crate::storage::Database;
 
 /// kvdb — Redis-compatible database on FoundationDB
 #[derive(Parser, Debug, Clone)]
@@ -49,6 +50,16 @@ pub struct ServerConfig {
     /// (e.g. "0.0.0.0:9090"). Disabled if not set.
     #[arg(long, env = "KVDB_METRICS_ADDR")]
     pub metrics_addr: Option<SocketAddr>,
+
+    /// Pre-opened FDB database handle (used by tests to inject an
+    /// already-booted database). Not settable from CLI or env.
+    #[arg(skip)]
+    pub db: Option<Database>,
+
+    /// Root prefix for FDB directories (e.g. `"kvdb_test_<uuid>"`).
+    /// When `None`, the listener uses `"kvdb"`.
+    #[arg(skip)]
+    pub root_prefix: Option<String>,
 }
 
 impl ServerConfig {
@@ -80,6 +91,8 @@ impl Default for ServerConfig {
             tracy: false,
             otlp_endpoint: None,
             metrics_addr: None,
+            db: None,
+            root_prefix: None,
         }
     }
 }

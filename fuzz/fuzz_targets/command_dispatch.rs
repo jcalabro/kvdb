@@ -16,6 +16,8 @@
 
 #![no_main]
 
+use std::sync::OnceLock;
+
 use arbitrary::Arbitrary;
 use bytes::{Bytes, BytesMut};
 use libfuzzer_sys::fuzz_target;
@@ -24,6 +26,8 @@ use kvdb::commands::{self, CommandResponse};
 use kvdb::protocol::types::{RedisCommand, RespValue};
 use kvdb::protocol::{encoder, parser};
 use kvdb::server::connection::ConnectionState;
+use kvdb::storage::database::Database;
+use kvdb::storage::directories::Directories;
 
 /// A fuzz-friendly representation of a Redis command.
 ///
@@ -34,6 +38,31 @@ use kvdb::server::connection::ConnectionState;
 struct FuzzCommand {
     name: Vec<u8>,
     args: Vec<Vec<u8>>,
+}
+
+/// Shared FDB handles for the fuzz process (initialized once).
+fn fuzz_fdb() -> &'static (Database, Directories) {
+    static FDB: OnceLock<(Database, Directories)> = OnceLock::new();
+    FDB.get_or_init(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let db = Database::new("fdb.cluster").expect("failed to open FDB for fuzzing");
+        let dirs = rt
+            .block_on(Directories::open(&db, 0, "kvdb_fuzz"))
+            .expect("failed to open directories for fuzzing");
+        (db, dirs)
+    })
+}
+
+/// Lightweight single-threaded tokio runtime for running the async
+/// dispatch inside the synchronous fuzz target.
+fn fuzz_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("failed to create tokio runtime for fuzzing")
 }
 
 fuzz_target!(|input: FuzzCommand| {
@@ -78,11 +107,15 @@ fuzz_target!(|input: FuzzCommand| {
     };
 
     // Dispatch the command against a fresh connection state.
-    let mut state = ConnectionState::default();
-    let response = match commands::dispatch(&cmd, &mut state) {
-        CommandResponse::Reply(resp) => resp,
-        CommandResponse::Close(resp) => resp,
-    };
+    let (db, dirs) = fuzz_fdb();
+    let rt = fuzz_runtime();
+    let mut state = ConnectionState::new(db.clone(), dirs.clone());
+    let response = rt.block_on(async {
+        match commands::dispatch(&cmd, &mut state).await {
+            CommandResponse::Reply(resp) => resp,
+            CommandResponse::Close(resp) => resp,
+        }
+    });
 
     // Encode the dispatch response in the connection's protocol version.
     // This exercises the encoder on real dispatch-produced values — including
