@@ -1,0 +1,22 @@
+[package]
+name = "kvdb-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+kvdb = { path = ".." }
+bytes = "1"
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "resp_parser"
+path = "fuzz_targets/resp_parser.rs"
+doc = false

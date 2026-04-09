@@ -1,0 +1,37 @@
+name: CI
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@nextest
+
+      # Install FDB client library
+      - name: Install FoundationDB client
+        run: |
+          wget https://github.com/apple/foundationdb/releases/download/7.3.63/foundationdb-clients_7.3.63-1_amd64.deb
+          sudo dpkg -i foundationdb-clients_7.3.63-1_amd64.deb
+
+      # Start FDB cluster
+      - name: Start FDB
+        run: just up
+
+      # Lint + test
+      - name: CI
+        run: just ci
+
+      - name: Stop FDB
+        if: always()
+        run: just down
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: just lint
