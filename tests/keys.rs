@@ -1018,3 +1018,42 @@ async fn flushall_clears_all_dbs() {
     let size: i64 = redis::cmd("DBSIZE").query_async(&mut con).await.unwrap();
     assert_eq!(size, 0);
 }
+
+// ---------------------------------------------------------------------------
+// Background expiry tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn background_expiry_cleans_up_keys() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // Set key with 200ms TTL.
+    let _: () = redis::cmd("SET")
+        .arg("ephemeral")
+        .arg("val")
+        .arg("PX")
+        .arg(200)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // Verify it exists.
+    let exists: i64 = redis::cmd("EXISTS")
+        .arg("ephemeral")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(exists, 1);
+
+    // Wait for expiry + background worker scan.
+    tokio::time::sleep(tokio::time::Duration::from_millis(700)).await;
+
+    // Key should be gone.
+    let exists: i64 = redis::cmd("EXISTS")
+        .arg("ephemeral")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(exists, 0);
+}

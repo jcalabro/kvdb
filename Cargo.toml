@@ -13,6 +13,7 @@ tracy = ["dep:tracing-tracy"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 bytes = "1"
 memchr = "2"
 itoa = "1"
