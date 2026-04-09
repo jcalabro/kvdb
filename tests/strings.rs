@@ -1127,6 +1127,87 @@ async fn exists_works_on_any_type() {
     assert_eq!(count, 1, "EXISTS should work on any type");
 }
 
+// ---------------------------------------------------------------------------
+// SET NX GET interaction
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn set_nx_get_on_existing_returns_old_value() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+    let _: () = redis::cmd("SET")
+        .arg("k")
+        .arg("old")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    // SET k new NX GET -> should return "old" (SET is no-op, but GET reads)
+    let result: Option<String> = redis::cmd("SET")
+        .arg("k")
+        .arg("new")
+        .arg("NX")
+        .arg("GET")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(result, Some("old".to_string()));
+    // Verify value was NOT changed
+    let val: String = redis::cmd("GET").arg("k").query_async(&mut con).await.unwrap();
+    assert_eq!(val, "old");
+}
+
+// ---------------------------------------------------------------------------
+// INCRBYFLOAT large float (saturation guard)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn incrbyfloat_large_float_no_saturation() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+    // Set a value that, when incremented, produces a whole number > i64::MAX
+    let _: () = redis::cmd("SET")
+        .arg("k")
+        .arg("1e19")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let result: String = redis::cmd("INCRBYFLOAT")
+        .arg("k")
+        .arg("0")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    // Should NOT be "9223372036854775807" (i64::MAX saturation)
+    assert!(result.contains("1"), "result should represent 1e19, got: {result}");
+    assert!(
+        !result.contains("922337"),
+        "result should not be i64::MAX saturated, got: {result}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SET EX non-integer error message
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn set_ex_non_integer_returns_not_integer_error() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+    let result: redis::RedisResult<String> = redis::cmd("SET")
+        .arg("k")
+        .arg("v")
+        .arg("EX")
+        .arg("notanumber")
+        .query_async(&mut con)
+        .await;
+    assert!(result.is_err(), "SET EX notanumber should error");
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("not an integer or out of range"),
+        "expected 'not an integer or out of range' error, got: {err}"
+    );
+}
+
 #[tokio::test]
 async fn mget_returns_nil_for_wrong_type() {
     let ctx = TestContext::new().await;

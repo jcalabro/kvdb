@@ -54,8 +54,40 @@ struct SetFlags {
     get: bool,
     /// KEEPTTL: preserve existing TTL.
     keepttl: bool,
-    /// Absolute expiry timestamp in milliseconds, or 0 for none.
-    expires_at_ms: u64,
+    /// Raw expiry specification — resolved to an absolute timestamp inside the
+    /// transaction closure so that retries recompute relative offsets.
+    expiry: ExpirySpec,
+}
+
+/// Raw expiry specification parsed from SET flags. Absolute timestamps are
+/// stored directly; relative durations are stored as-is and resolved inside
+/// the transaction closure via `now_ms()`.
+#[derive(Debug, Clone)]
+enum ExpirySpec {
+    /// No expiry requested.
+    None,
+    /// EX <seconds> — relative.
+    ExSeconds(u64),
+    /// PX <milliseconds> — relative.
+    PxMillis(u64),
+    /// EXAT <seconds> — absolute.
+    ExatSeconds(u64),
+    /// PXAT <milliseconds> — absolute.
+    PxatMillis(u64),
+}
+
+impl ExpirySpec {
+    /// Resolve to an absolute expiry timestamp in milliseconds, calling
+    /// `now_ms()` for relative specs. Returns 0 when no expiry is set.
+    fn resolve(&self) -> u64 {
+        match self {
+            ExpirySpec::None => 0,
+            ExpirySpec::ExSeconds(s) => helpers::now_ms() + s * 1000,
+            ExpirySpec::PxMillis(ms) => helpers::now_ms() + ms,
+            ExpirySpec::ExatSeconds(s) => s * 1000,
+            ExpirySpec::PxatMillis(ms) => *ms,
+        }
+    }
 }
 
 /// Parse SET flags from args starting at index 2 (after key and value).
@@ -65,7 +97,7 @@ fn parse_set_flags(args: &[Bytes]) -> Result<SetFlags, RespValue> {
         xx: false,
         get: false,
         keepttl: false,
-        expires_at_ms: 0,
+        expiry: ExpirySpec::None,
     };
     let mut has_expiry = false;
     let mut i = 2; // skip key and value
@@ -107,7 +139,7 @@ fn parse_set_flags(args: &[Bytes]) -> Result<SetFlags, RespValue> {
                     return Err(RespValue::err("ERR syntax error"));
                 }
                 let secs = parse_positive_i64(&args[i], "set")?;
-                flags.expires_at_ms = helpers::now_ms() + (secs as u64) * 1000;
+                flags.expiry = ExpirySpec::ExSeconds(secs as u64);
                 has_expiry = true;
                 i += 1;
             }
@@ -120,7 +152,7 @@ fn parse_set_flags(args: &[Bytes]) -> Result<SetFlags, RespValue> {
                     return Err(RespValue::err("ERR syntax error"));
                 }
                 let ms = parse_positive_i64(&args[i], "set")?;
-                flags.expires_at_ms = helpers::now_ms() + ms as u64;
+                flags.expiry = ExpirySpec::PxMillis(ms as u64);
                 has_expiry = true;
                 i += 1;
             }
@@ -133,7 +165,7 @@ fn parse_set_flags(args: &[Bytes]) -> Result<SetFlags, RespValue> {
                     return Err(RespValue::err("ERR syntax error"));
                 }
                 let secs = parse_positive_i64(&args[i], "set")?;
-                flags.expires_at_ms = (secs as u64) * 1000;
+                flags.expiry = ExpirySpec::ExatSeconds(secs as u64);
                 has_expiry = true;
                 i += 1;
             }
@@ -146,7 +178,7 @@ fn parse_set_flags(args: &[Bytes]) -> Result<SetFlags, RespValue> {
                     return Err(RespValue::err("ERR syntax error"));
                 }
                 let ms = parse_positive_i64(&args[i], "set")?;
-                flags.expires_at_ms = ms as u64;
+                flags.expiry = ExpirySpec::PxatMillis(ms as u64);
                 has_expiry = true;
                 i += 1;
             }
@@ -161,12 +193,15 @@ fn parse_set_flags(args: &[Bytes]) -> Result<SetFlags, RespValue> {
 
 /// Parse a byte slice as a positive i64 (> 0). Returns an error
 /// response if the value is not a valid integer or is <= 0.
+///
+/// Redis distinguishes two error cases:
+/// - Non-integer input → `ERR value is not an integer or out of range`
+/// - Zero or negative  → `ERR invalid expire time in '<cmd>' command`
 fn parse_positive_i64(arg: &Bytes, cmd_name: &str) -> Result<i64, RespValue> {
-    let s = std::str::from_utf8(arg)
-        .map_err(|_| RespValue::err(format!("ERR invalid expire time in '{cmd_name}' command")))?;
+    let s = std::str::from_utf8(arg).map_err(|_| RespValue::err("ERR value is not an integer or out of range"))?;
     let val: i64 = s
         .parse()
-        .map_err(|_| RespValue::err(format!("ERR invalid expire time in '{cmd_name}' command")))?;
+        .map_err(|_| RespValue::err("ERR value is not an integer or out of range"))?;
     if val <= 0 {
         return Err(RespValue::err(format!(
             "ERR invalid expire time in '{cmd_name}' command"
@@ -208,17 +243,9 @@ pub async fn handle_set(args: &[Bytes], state: &ConnectionState) -> RespValue {
                 _ => None,
             };
 
-            // NX: only set if key does NOT exist (live).
-            if f.nx && live_meta.is_some() {
-                return Ok(SetResult::NotSet);
-            }
-
-            // XX: only set if key DOES exist (live).
-            if f.xx && live_meta.is_none() {
-                return Ok(SetResult::NotSet);
-            }
-
-            // GET: return old value. WRONGTYPE check on non-String.
+            // GET: read old value before any NX/XX short-circuit, so that
+            // SET k v NX GET returns the existing value even when NX prevents
+            // the write. WRONGTYPE check applies regardless.
             let old_value = if f.get {
                 match &live_meta {
                     Some(m) if m.key_type != KeyType::String => {
@@ -243,12 +270,23 @@ pub async fn handle_set(args: &[Bytes], state: &ConnectionState) -> RespValue {
                 None
             };
 
-            // Determine expiry for the new key.
+            // NX: only set if key does NOT exist (live).
+            if f.nx && live_meta.is_some() {
+                return Ok(SetResult::WithOldValue(old_value));
+            }
+
+            // XX: only set if key DOES exist (live).
+            if f.xx && live_meta.is_none() {
+                return Ok(SetResult::NotSet);
+            }
+
+            // Determine expiry for the new key. Resolve relative specs
+            // inside the transaction so retries recompute from current time.
             let expires_at_ms = if f.keepttl {
                 // Preserve existing TTL from the live meta.
                 live_meta.as_ref().map_or(0, |m| m.expires_at_ms)
             } else {
-                f.expires_at_ms
+                f.expiry.resolve()
             };
 
             // Write the new string value. Pass the raw_meta (even if
@@ -404,19 +442,19 @@ pub async fn handle_setex(args: &[Bytes], state: &ConnectionState) -> RespValue 
 
     let key = args[0].to_vec();
     let value = args[2].to_vec();
-    let expires_at_ms = helpers::now_ms() + (seconds as u64) * 1000;
+    let secs = seconds as u64;
 
     match run_transact(&state.db, "SETEX", |tr| {
         let dirs = state.dirs.clone();
         let k = key.clone();
         let v = value.clone();
-        let exp = expires_at_ms;
         async move {
+            let expires_at_ms = helpers::now_ms() + secs * 1000;
             let raw_meta = ObjectMeta::read(&tr, &dirs, &k, 0, false)
                 .await
                 .map_err(helpers::storage_err)?;
 
-            helpers::write_string(&tr, &dirs, &k, &v, exp, raw_meta.as_ref()).map_err(helpers::cmd_err)?;
+            helpers::write_string(&tr, &dirs, &k, &v, expires_at_ms, raw_meta.as_ref()).map_err(helpers::cmd_err)?;
             Ok(())
         }
     })
@@ -443,19 +481,19 @@ pub async fn handle_psetex(args: &[Bytes], state: &ConnectionState) -> RespValue
 
     let key = args[0].to_vec();
     let value = args[2].to_vec();
-    let expires_at_ms = helpers::now_ms() + ms as u64;
+    let millis = ms as u64;
 
     match run_transact(&state.db, "PSETEX", |tr| {
         let dirs = state.dirs.clone();
         let k = key.clone();
         let v = value.clone();
-        let exp = expires_at_ms;
         async move {
+            let expires_at_ms = helpers::now_ms() + millis;
             let raw_meta = ObjectMeta::read(&tr, &dirs, &k, 0, false)
                 .await
                 .map_err(helpers::storage_err)?;
 
-            helpers::write_string(&tr, &dirs, &k, &v, exp, raw_meta.as_ref()).map_err(helpers::cmd_err)?;
+            helpers::write_string(&tr, &dirs, &k, &v, expires_at_ms, raw_meta.as_ref()).map_err(helpers::cmd_err)?;
             Ok(())
         }
     })
@@ -742,28 +780,21 @@ pub async fn handle_decrby(args: &[Bytes], state: &ConnectionState) -> RespValue
 // ---------------------------------------------------------------------------
 
 /// Format a float following Redis INCRBYFLOAT rules:
-/// - If the result is an exact integer, format without decimal point.
+/// - If the result is an exact integer that fits in i64, format without decimal point.
 /// - Otherwise, use minimal precision and strip trailing zeros.
 fn format_redis_float(val: f64) -> String {
-    if val.fract() == 0.0 && val.is_finite() {
-        // Integer result — format without decimal.
+    if val.fract() == 0.0 && val.is_finite() && val >= i64::MIN as f64 && val <= i64::MAX as f64 {
+        // Integer result that fits in i64 — format without decimal.
         format!("{}", val as i64)
     } else {
         // Use ryu for fast float-to-string, then strip trailing zeros.
-        let s = format!("{}", val);
-        // The default Display for f64 should give minimal precision.
-        // But we need to strip trailing zeros after the decimal point.
-        if let Some(dot_pos) = s.find('.') {
+        let mut s = ryu::Buffer::new().format(val).to_string();
+        if s.contains('.') {
             let trimmed = s.trim_end_matches('0');
-            if trimmed.ends_with('.') {
-                // All zeros after decimal — remove the dot too.
-                trimmed[..dot_pos].to_string()
-            } else {
-                trimmed.to_string()
-            }
-        } else {
-            s
+            let trimmed = trimmed.trim_end_matches('.');
+            s.truncate(trimmed.len());
         }
+        s
     }
 }
 
