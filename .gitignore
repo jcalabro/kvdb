@@ -30,3 +30,4 @@ fuzz/corpus/
 /target
 
 /docs/superpowers
+.worktrees/
