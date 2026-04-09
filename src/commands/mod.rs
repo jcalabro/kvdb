@@ -11,6 +11,20 @@ use crate::error::CommandError;
 use crate::protocol::types::{RedisCommand, RespValue};
 use crate::server::connection::ConnectionState;
 
+/// Sanitize a byte slice for safe embedding in RESP simple error messages.
+///
+/// RESP simple errors (`-ERR ...\r\n`) are line-delimited — if the message
+/// contains `\r` or `\n`, the parser will see a premature frame boundary
+/// and the trailing data becomes a rogue RESP value (protocol injection).
+///
+/// This function replaces control characters with safe escape sequences
+/// so that user-controlled data (command names, subcommands, arguments)
+/// can be safely included in error responses.
+fn sanitize_for_error(data: &[u8]) -> String {
+    let lossy = String::from_utf8_lossy(data);
+    lossy.replace('\r', "\\r").replace('\n', "\\n")
+}
+
 /// Result of dispatching a command.
 #[derive(Debug)]
 #[must_use]
@@ -35,10 +49,10 @@ pub fn dispatch(cmd: &RedisCommand, state: &mut ConnectionState) -> CommandRespo
         b"COMMAND" => CommandResponse::Reply(handle_command(&cmd.args)),
         b"CLIENT" => CommandResponse::Reply(handle_client(&cmd.args)),
         _ => {
-            let name_str = String::from_utf8_lossy(&cmd.name);
+            let name_str = sanitize_for_error(&cmd.name);
             let mut msg = format!("ERR unknown command '{name_str}', with args beginning with:");
             for arg in cmd.args.iter().take(3) {
-                msg.push_str(&format!(" '{}'", String::from_utf8_lossy(arg)));
+                msg.push_str(&format!(" '{}'", sanitize_for_error(arg)));
             }
             CommandResponse::Reply(RespValue::Error(Bytes::from(msg)))
         }
@@ -143,7 +157,7 @@ fn handle_command(args: &[Bytes]) -> RespValue {
         b"INFO" => RespValue::Array(Some(vec![])),
         _ => RespValue::err(format!(
             "ERR unknown subcommand or wrong number of arguments for 'COMMAND|{}' command",
-            String::from_utf8_lossy(&subcmd)
+            sanitize_for_error(&subcmd)
         )),
     }
 }
@@ -164,7 +178,7 @@ fn handle_client(args: &[Bytes]) -> RespValue {
         b"INFO" => RespValue::BulkString(Some(Bytes::from_static(b""))),
         _ => RespValue::err(format!(
             "ERR unknown subcommand or wrong number of arguments for 'CLIENT|{}' command",
-            String::from_utf8_lossy(&subcmd)
+            sanitize_for_error(&subcmd)
         )),
     }
 }
@@ -232,6 +246,24 @@ mod tests {
         let cmd = make_cmd(b"FAKECMD", vec![]);
         match dispatch_reply(&cmd) {
             RespValue::Error(_) => {} // expected
+            other => panic!("expected error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_command_with_crlf_in_name_produces_safe_error() {
+        // Regression test: command names with \r\n must be sanitized
+        // in error messages to prevent RESP protocol injection.
+        let cmd = make_cmd(b"FOO\r\nBAR", vec![b"arg\r\n"]);
+        match dispatch_reply(&cmd) {
+            RespValue::Error(msg) => {
+                let s = String::from_utf8_lossy(&msg);
+                // \r and \n must be escaped, not literal
+                assert!(!s.contains('\r'), "error contains raw \\r: {s}");
+                assert!(!s.contains('\n'), "error contains raw \\n: {s}");
+                assert!(s.contains("\\r"), "error should contain escaped \\r: {s}");
+                assert!(s.contains("\\n"), "error should contain escaped \\n: {s}");
+            }
             other => panic!("expected error, got {other:?}"),
         }
     }

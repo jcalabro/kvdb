@@ -47,6 +47,7 @@ fuzz duration="30":
     cargo +nightly fuzz run resp_multi_frame -- -max_total_time={{duration}}
     cargo +nightly fuzz run resp_roundtrip -- -max_total_time={{duration}}
     cargo +nightly fuzz run resp_encoder -- -max_total_time={{duration}}
+    cargo +nightly fuzz run command_dispatch -- -max_total_time={{duration}}
 
 # Run benchmarks
 bench:
