@@ -56,11 +56,7 @@ impl Directories {
     ///
     /// `root_prefix` is the top-level directory name — `"kvdb"` in
     /// production, `"kvdb_test_<uuid>"` in tests for isolation.
-    pub async fn open(
-        db: &super::database::Database,
-        namespace: u8,
-        root_prefix: &str,
-    ) -> Result<Self, StorageError> {
+    pub async fn open(db: &super::database::Database, namespace: u8, root_prefix: &str) -> Result<Self, StorageError> {
         let span = info_span!("dir_open", ns = namespace, root = root_prefix);
         let _enter = span.enter();
 

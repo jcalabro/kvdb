@@ -29,11 +29,7 @@ impl StorageTestContext {
         let root_prefix = format!("kvdb_test_{}", Uuid::new_v4());
         let db = Database::new("fdb.cluster").unwrap();
         let dirs = Directories::open(&db, 0, &root_prefix).await.unwrap();
-        Self {
-            db,
-            dirs,
-            root_prefix,
-        }
+        Self { db, dirs, root_prefix }
     }
 }
 
@@ -51,9 +47,7 @@ impl Drop for StorageTestContext {
             rt.block_on(async {
                 let trx = db.inner().create_trx().unwrap();
                 let dir_layer = DirectoryLayer::default();
-                let _ = dir_layer
-                    .remove(&trx, &[root_prefix])
-                    .await;
+                let _ = dir_layer.remove(&trx, &[root_prefix]).await;
                 let _ = trx.commit().await;
             });
         });
@@ -75,9 +69,7 @@ async fn meta_write_read_roundtrip() {
     trx.commit().await.unwrap();
 
     let trx = ctx.db.inner().create_trx().unwrap();
-    let read_meta = ObjectMeta::read(&trx, &ctx.dirs, key, 0, false)
-        .await
-        .unwrap();
+    let read_meta = ObjectMeta::read(&trx, &ctx.dirs, key, 0, false).await.unwrap();
     assert_eq!(read_meta, Some(meta));
 }
 
@@ -106,9 +98,7 @@ async fn meta_lazy_expiry_returns_none() {
 
     // Read with now_ms > expires_at_ms => lazy expiry returns None.
     let trx = ctx.db.inner().create_trx().unwrap();
-    let result = ObjectMeta::read(&trx, &ctx.dirs, key, 2_000, false)
-        .await
-        .unwrap();
+    let result = ObjectMeta::read(&trx, &ctx.dirs, key, 2_000, false).await.unwrap();
     assert_eq!(result, None);
 }
 
@@ -125,9 +115,7 @@ async fn meta_non_expired_returns_some() {
 
     // Read with now_ms < expires_at_ms => key is still alive.
     let trx = ctx.db.inner().create_trx().unwrap();
-    let result = ObjectMeta::read(&trx, &ctx.dirs, key, 50_000, false)
-        .await
-        .unwrap();
+    let result = ObjectMeta::read(&trx, &ctx.dirs, key, 50_000, false).await.unwrap();
     assert!(result.is_some());
     assert_eq!(result.unwrap().expires_at_ms, 100_000);
 }
@@ -148,9 +136,7 @@ async fn meta_delete_removes_key() {
     trx.commit().await.unwrap();
 
     let trx = ctx.db.inner().create_trx().unwrap();
-    let result = ObjectMeta::read(&trx, &ctx.dirs, key, 0, false)
-        .await
-        .unwrap();
+    let result = ObjectMeta::read(&trx, &ctx.dirs, key, 0, false).await.unwrap();
     assert_eq!(result, None);
 }
 
@@ -209,9 +195,7 @@ async fn chunking_small_value() {
     trx.commit().await.unwrap();
 
     let trx = ctx.db.inner().create_trx().unwrap();
-    let result = chunking::read_chunks(&trx, &ctx.dirs, key, 1, false)
-        .await
-        .unwrap();
+    let result = chunking::read_chunks(&trx, &ctx.dirs, key, 1, false).await.unwrap();
     assert_eq!(result, data);
 }
 
@@ -227,9 +211,7 @@ async fn chunking_empty_value() {
     trx.commit().await.unwrap();
 
     let trx = ctx.db.inner().create_trx().unwrap();
-    let result = chunking::read_chunks(&trx, &ctx.dirs, key, 0, false)
-        .await
-        .unwrap();
+    let result = chunking::read_chunks(&trx, &ctx.dirs, key, 0, false).await.unwrap();
     assert!(result.is_empty());
 }
 
@@ -245,9 +227,7 @@ async fn chunking_large_value_500kb() {
     trx.commit().await.unwrap();
 
     let trx = ctx.db.inner().create_trx().unwrap();
-    let result = chunking::read_chunks(&trx, &ctx.dirs, key, 5, false)
-        .await
-        .unwrap();
+    let result = chunking::read_chunks(&trx, &ctx.dirs, key, 5, false).await.unwrap();
     assert_eq!(result.len(), 500_000);
     assert_eq!(result, data);
 }
@@ -264,9 +244,7 @@ async fn chunking_exact_boundary() {
     trx.commit().await.unwrap();
 
     let trx = ctx.db.inner().create_trx().unwrap();
-    let result = chunking::read_chunks(&trx, &ctx.dirs, key, 1, false)
-        .await
-        .unwrap();
+    let result = chunking::read_chunks(&trx, &ctx.dirs, key, 1, false).await.unwrap();
     assert_eq!(result.len(), CHUNK_SIZE);
     assert_eq!(result, data);
 }
@@ -283,9 +261,7 @@ async fn chunking_boundary_plus_one() {
     trx.commit().await.unwrap();
 
     let trx = ctx.db.inner().create_trx().unwrap();
-    let result = chunking::read_chunks(&trx, &ctx.dirs, key, 2, false)
-        .await
-        .unwrap();
+    let result = chunking::read_chunks(&trx, &ctx.dirs, key, 2, false).await.unwrap();
     assert_eq!(result.len(), CHUNK_SIZE + 1);
     assert_eq!(result, data);
 }
@@ -335,9 +311,7 @@ async fn chunking_overwrite_different_size() {
 
     // Read back — should get the small value.
     let trx = ctx.db.inner().create_trx().unwrap();
-    let result = chunking::read_chunks(&trx, &ctx.dirs, key, 1, false)
-        .await
-        .unwrap();
+    let result = chunking::read_chunks(&trx, &ctx.dirs, key, 1, false).await.unwrap();
     assert_eq!(result, data_small);
 }
 
@@ -361,10 +335,7 @@ async fn directories_all_subspaces_have_non_empty_prefixes() {
     ];
 
     for (i, prefix) in prefixes.iter().enumerate() {
-        assert!(
-            !prefix.is_empty(),
-            "subspace {i} has empty prefix"
-        );
+        assert!(!prefix.is_empty(), "subspace {i} has empty prefix");
     }
 }
 
@@ -384,12 +355,7 @@ async fn directories_all_subspace_prefixes_distinct() {
     ];
 
     let unique: HashSet<&Vec<u8>> = prefixes.iter().collect();
-    assert_eq!(
-        unique.len(),
-        8,
-        "expected 8 distinct prefixes, got {}",
-        unique.len()
-    );
+    assert_eq!(unique.len(), 8, "expected 8 distinct prefixes, got {}", unique.len());
 }
 
 #[tokio::test]
