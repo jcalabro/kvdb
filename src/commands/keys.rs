@@ -2,8 +2,10 @@
 //!
 //! **Read commands**: TTL, PTTL, EXPIRETIME, PEXPIRETIME — query TTL metadata.
 //! **Write commands**: EXPIRE, PEXPIRE, EXPIREAT, PEXPIREAT, PERSIST — modify TTL metadata.
+//! **Introspection commands**: TYPE, TOUCH, UNLINK, DBSIZE — key inspection and management.
 
 use bytes::Bytes;
+use foundationdb::RangeOption;
 
 use crate::error::CommandError;
 use crate::protocol::types::RespValue;
@@ -424,6 +426,156 @@ pub async fn handle_persist(args: &[Bytes], state: &ConnectionState) -> RespValu
     .await
     {
         Ok(val) => RespValue::Integer(val),
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TYPE key
+// ---------------------------------------------------------------------------
+
+/// TYPE key -- Returns the string representation of the type stored at key.
+///
+/// Returns:
+/// - "none" if the key does not exist
+/// - "string", "hash", "set", "zset", "list", or "stream" for existing keys
+pub async fn handle_type(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.len() != 1 {
+        return RespValue::err(CommandError::WrongArity { name: "TYPE".into() }.to_string());
+    }
+
+    match run_transact(&state.db, "TYPE", |tr| {
+        let dirs = state.dirs.clone();
+        let key = args[0].clone();
+        async move {
+            let now = helpers::now_ms();
+            let meta = ObjectMeta::read(&tr, &dirs, &key, now, false)
+                .await
+                .map_err(helpers::storage_err)?;
+
+            match meta {
+                None => Ok("none"),
+                Some(m) => Ok(m.key_type.as_redis_type_str()),
+            }
+        }
+    })
+    .await
+    {
+        Ok(type_str) => RespValue::SimpleString(Bytes::from(type_str)),
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// UNLINK key [key ...]
+// ---------------------------------------------------------------------------
+
+/// UNLINK key [key ...] -- Delete keys asynchronously.
+///
+/// For Phase 1, this is identical to DEL (synchronous deletion).
+/// Returns the count of keys that were deleted.
+pub async fn handle_unlink(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.is_empty() {
+        return RespValue::err(CommandError::WrongArity { name: "UNLINK".into() }.to_string());
+    }
+
+    match run_transact(&state.db, "UNLINK", |tr| {
+        let dirs = state.dirs.clone();
+        let keys: Vec<Bytes> = args.to_vec();
+        async move {
+            let now = helpers::now_ms();
+            let mut count: i64 = 0;
+            for k in &keys {
+                let deleted = helpers::delete_object(&tr, &dirs, k, now)
+                    .await
+                    .map_err(helpers::cmd_err)?;
+                if deleted {
+                    count += 1;
+                }
+            }
+            Ok(count)
+        }
+    })
+    .await
+    {
+        Ok(count) => RespValue::Integer(count),
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TOUCH key [key ...]
+// ---------------------------------------------------------------------------
+
+/// TOUCH key [key ...] -- Alter the last access time of keys.
+///
+/// Returns the count of keys that exist (non-expired).
+pub async fn handle_touch(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.is_empty() {
+        return RespValue::err(CommandError::WrongArity { name: "TOUCH".into() }.to_string());
+    }
+
+    match run_transact(&state.db, "TOUCH", |tr| {
+        let dirs = state.dirs.clone();
+        let keys: Vec<Bytes> = args.to_vec();
+        async move {
+            let now = helpers::now_ms();
+            let mut count: i64 = 0;
+            for k in &keys {
+                let meta = ObjectMeta::read(&tr, &dirs, k, now, false)
+                    .await
+                    .map_err(helpers::storage_err)?;
+                if meta.is_some() {
+                    count += 1;
+                }
+            }
+            Ok(count)
+        }
+    })
+    .await
+    {
+        Ok(count) => RespValue::Integer(count),
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DBSIZE
+// ---------------------------------------------------------------------------
+
+/// DBSIZE -- Returns the number of keys in the currently selected database.
+///
+/// Counts all non-expired keys in the current namespace.
+pub async fn handle_dbsize(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if !args.is_empty() {
+        return RespValue::err(CommandError::WrongArity { name: "DBSIZE".into() }.to_string());
+    }
+
+    match run_transact(&state.db, "DBSIZE", |tr| {
+        let dirs = state.dirs.clone();
+        async move {
+            let now = helpers::now_ms();
+            let (begin, end) = dirs.meta.range();
+            let range_opt = RangeOption::from((begin.as_slice(), end.as_slice()));
+            let kvs = tr
+                .get_range(&range_opt, 1, true)
+                .await
+                .map_err(|e| helpers::cmd_err(CommandError::Generic(e.to_string())))?;
+
+            let mut count: i64 = 0;
+            for kv in kvs.iter() {
+                if let Ok(meta) = ObjectMeta::deserialize(kv.value())
+                    && !meta.is_expired(now)
+                {
+                    count += 1;
+                }
+            }
+            Ok(count)
+        }
+    })
+    .await
+    {
+        Ok(count) => RespValue::Integer(count),
         Err(e) => helpers::storage_err_to_resp(e),
     }
 }

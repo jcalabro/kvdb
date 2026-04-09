@@ -79,6 +79,10 @@ pub async fn dispatch(cmd: &RedisCommand, state: &mut ConnectionState) -> Comman
         b"EXPIREAT" => CommandResponse::Reply(keys::handle_expireat(&cmd.args, state).await),
         b"PEXPIREAT" => CommandResponse::Reply(keys::handle_pexpireat(&cmd.args, state).await),
         b"PERSIST" => CommandResponse::Reply(keys::handle_persist(&cmd.args, state).await),
+        b"TYPE" => CommandResponse::Reply(keys::handle_type(&cmd.args, state).await),
+        b"UNLINK" => CommandResponse::Reply(keys::handle_unlink(&cmd.args, state).await),
+        b"TOUCH" => CommandResponse::Reply(keys::handle_touch(&cmd.args, state).await),
+        b"DBSIZE" => CommandResponse::Reply(keys::handle_dbsize(&cmd.args, state).await),
         _ => {
             let name_str = sanitize_for_error(&cmd.name);
             let mut msg = format!("ERR unknown command '{name_str}', with args beginning with:");

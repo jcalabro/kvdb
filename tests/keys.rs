@@ -511,3 +511,130 @@ async fn persist_nonexistent_returns_zero() {
         .unwrap();
     assert_eq!(result, 0);
 }
+
+// ---------------------------------------------------------------------------
+// TYPE tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn type_string_key() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // SET a string key
+    let _: () = redis::cmd("SET")
+        .arg("mykey")
+        .arg("value")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // TYPE should return "string"
+    let result: String = redis::cmd("TYPE").arg("mykey").query_async(&mut con).await.unwrap();
+    assert_eq!(result, "string");
+}
+
+#[tokio::test]
+async fn type_nonexistent_returns_none() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // TYPE on nonexistent key should return "none"
+    let result: String = redis::cmd("TYPE")
+        .arg("nonexistent")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(result, "none");
+}
+
+// ---------------------------------------------------------------------------
+// UNLINK tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn unlink_deletes_keys() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // SET two keys
+    let _: () = redis::cmd("SET").arg("a").arg("1").query_async(&mut con).await.unwrap();
+    let _: () = redis::cmd("SET").arg("b").arg("2").query_async(&mut con).await.unwrap();
+
+    // UNLINK a, b, c should return 2 (a and b exist, c doesn't)
+    let result: i64 = redis::cmd("UNLINK")
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(result, 2);
+
+    // Verify keys are deleted
+    let exists_a: i64 = redis::cmd("EXISTS").arg("a").query_async(&mut con).await.unwrap();
+    let exists_b: i64 = redis::cmd("EXISTS").arg("b").query_async(&mut con).await.unwrap();
+    assert_eq!(exists_a, 0);
+    assert_eq!(exists_b, 0);
+}
+
+// ---------------------------------------------------------------------------
+// TOUCH tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn touch_returns_existing_count() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // SET two keys
+    let _: () = redis::cmd("SET").arg("a").arg("1").query_async(&mut con).await.unwrap();
+    let _: () = redis::cmd("SET").arg("b").arg("2").query_async(&mut con).await.unwrap();
+
+    // TOUCH a, b, c should return 2 (a and b exist, c doesn't)
+    let result: i64 = redis::cmd("TOUCH")
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(result, 2);
+}
+
+// ---------------------------------------------------------------------------
+// DBSIZE tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn dbsize_empty_returns_zero() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // DBSIZE on empty DB should return 0
+    // Use cmd with no args - redis crate requires explicit query for zero-arg commands
+    let result: i64 = redis::cmd("DBSIZE").query_async(&mut con).await.unwrap();
+    assert_eq!(result, 0);
+}
+
+#[tokio::test]
+async fn dbsize_reflects_key_count() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // SET three keys
+    let _: () = redis::cmd("SET").arg("a").arg("1").query_async(&mut con).await.unwrap();
+    let _: () = redis::cmd("SET").arg("b").arg("2").query_async(&mut con).await.unwrap();
+    let _: () = redis::cmd("SET").arg("c").arg("3").query_async(&mut con).await.unwrap();
+
+    // DBSIZE should return 3
+    let result: i64 = redis::cmd("DBSIZE").query_async(&mut con).await.unwrap();
+    assert_eq!(result, 3);
+
+    // DEL one key
+    let _: i64 = redis::cmd("DEL").arg("b").query_async(&mut con).await.unwrap();
+
+    // DBSIZE should now return 2
+    let result: i64 = redis::cmd("DBSIZE").query_async(&mut con).await.unwrap();
+    assert_eq!(result, 2);
+}

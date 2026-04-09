@@ -226,6 +226,10 @@ fn metric_label_for_command(name: &[u8]) -> &'static str {
         b"EXPIREAT" => "EXPIREAT",
         b"PEXPIREAT" => "PEXPIREAT",
         b"PERSIST" => "PERSIST",
+        b"TYPE" => "TYPE",
+        b"UNLINK" => "UNLINK",
+        b"TOUCH" => "TOUCH",
+        b"DBSIZE" => "DBSIZE",
         _ => "UNKNOWN",
     }
 }
