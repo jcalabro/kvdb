@@ -26,11 +26,15 @@ const SUBSPACE_NAMES: [&str; 8] = ["meta", "obj", "hash", "set", "zset", "zset_i
 ///
 /// All eight subspaces are opened in a single transaction when the
 /// namespace is first accessed. The `DirectorySubspace` handles are
-/// cheap to clone (inner `Arc`).
+/// cheap to clone (inner `Arc`). This struct is `Clone + Send + Sync`,
+/// safe to share across async tasks.
 #[derive(Clone)]
 pub struct Directories {
     /// The namespace index (0-15).
     pub namespace: u8,
+    /// The root prefix used for directory paths (e.g. `"kvdb"` or
+    /// `"kvdb_test_<uuid>"`). Stored for cleanup (FLUSHDB) and debugging.
+    pub root_prefix: String,
 
     /// `kvdb/<ns>/meta` — per-key ObjectMeta
     pub meta: DirectorySubspace,
@@ -93,6 +97,7 @@ impl Directories {
         // SUBSPACE_NAMES order: meta, obj, hash, set, zset, zset_idx, list, expire
         Ok(Self {
             namespace,
+            root_prefix: root_prefix.to_string(),
             meta: subspaces.remove(0),
             obj: subspaces.remove(0),
             hash: subspaces.remove(0),

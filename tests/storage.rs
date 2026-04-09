@@ -127,16 +127,41 @@ async fn meta_operations() {
         assert_eq!(read.cardinality, 42, "cardinality mismatch for {kt:?}");
     }
 
+    // reading garbage bytes from the meta key returns a serialization error
+    let garbage_key = dirs.meta_key(b"garbage_meta");
+    let trx = db.inner().create_trx().unwrap();
+    trx.set(&garbage_key, b"this is not valid bincode");
+    trx.commit().await.unwrap();
+
+    let trx = db.inner().create_trx().unwrap();
+    let result = ObjectMeta::read(&trx, &dirs, b"garbage_meta", 0, false).await;
+    assert!(result.is_err(), "reading garbage meta should return error");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("serialization"),
+        "error should mention serialization, got: {err_msg}"
+    );
+
     cleanup(&db, &root).await;
 }
 
 // ─────────────────────────────────────────────────────────
-// Chunking: small, empty, large, boundaries, delete, overwrite
+// Chunking: 1-byte, small, empty, large, boundaries, delete, overwrite
 // ─────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn chunk_operations() {
     let (db, dirs, root) = setup().await;
+
+    // 1-byte value
+    let trx = db.inner().create_trx().unwrap();
+    let nc = chunking::write_chunks(&trx, &dirs, b"c_1byte", b"\x42");
+    assert_eq!(nc, 1);
+    trx.commit().await.unwrap();
+
+    let trx = db.inner().create_trx().unwrap();
+    let result = chunking::read_chunks(&trx, &dirs, b"c_1byte", 1, false).await.unwrap();
+    assert_eq!(result, b"\x42", "1-byte value mismatch");
 
     // small value (< 1 chunk)
     let trx = db.inner().create_trx().unwrap();

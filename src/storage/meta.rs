@@ -10,12 +10,30 @@
 //! This metadata is read on every command to enforce type safety,
 //! check expiration, and locate data.
 
+use bincode::Options;
 use foundationdb::Transaction;
 use serde::{Deserialize, Serialize};
 use tracing::trace_span;
 
 use super::directories::Directories;
 use crate::error::StorageError;
+
+/// Maximum serialized size of an ObjectMeta in bytes.
+///
+/// ObjectMeta is a fixed-size struct (~60 bytes with bincode). We set a
+/// generous limit of 1 KB to guard against memory exhaustion if FDB
+/// returns corrupted data (e.g., a different value type was written to
+/// the meta key due to a bug).
+const MAX_META_SIZE: u64 = 1024;
+
+/// Shared bincode configuration.
+///
+/// Uses fixed-integer encoding (matching bincode 1.x default) with a
+/// size limit for deserialization safety. Both `serialize` and
+/// `deserialize` must use the same encoding, so we centralize it here.
+fn bincode_config() -> impl bincode::Options {
+    bincode::options().with_fixint_encoding().with_limit(MAX_META_SIZE)
+}
 
 /// The type of value stored under a Redis key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,18 +92,27 @@ impl ObjectMeta {
     }
 
     /// Returns `true` if this key has expired relative to `now_ms`.
+    ///
+    /// Redis semantics: a key expires AT the specified timestamp, meaning
+    /// `now_ms >= expires_at_ms` is expired (not strictly greater-than).
     pub fn is_expired(&self, now_ms: u64) -> bool {
-        self.expires_at_ms > 0 && now_ms > self.expires_at_ms
+        self.expires_at_ms > 0 && now_ms >= self.expires_at_ms
     }
 
     /// Serialize to bincode bytes.
     pub fn serialize(&self) -> Result<Vec<u8>, StorageError> {
-        bincode::serialize(self).map_err(|e| StorageError::Serialization(e.to_string()))
+        bincode_config()
+            .serialize(self)
+            .map_err(|e| StorageError::Serialization(e.to_string()))
     }
 
     /// Deserialize from bincode bytes.
+    ///
+    /// Enforces a size limit to prevent memory exhaustion from corrupted data.
     pub fn deserialize(bytes: &[u8]) -> Result<Self, StorageError> {
-        bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+        bincode_config()
+            .deserialize(bytes)
+            .map_err(|e| StorageError::Serialization(e.to_string()))
     }
 
     /// Read ObjectMeta for `key` from FDB. Returns `None` if the key
@@ -231,7 +258,14 @@ mod tests {
         let mut meta = ObjectMeta::new_string(1, 10);
         meta.expires_at_ms = 5_000;
         assert!(!meta.is_expired(4_999));
-        assert!(!meta.is_expired(5_000)); // at exactly the boundary, not expired
+    }
+
+    #[test]
+    fn expiry_at_boundary() {
+        // Redis semantics: key expires AT the timestamp (>=, not >).
+        let mut meta = ObjectMeta::new_string(1, 10);
+        meta.expires_at_ms = 5_000;
+        assert!(meta.is_expired(5_000), "key should be expired at exactly expires_at_ms");
     }
 
     #[test]
@@ -240,6 +274,19 @@ mod tests {
         meta.expires_at_ms = 5_000;
         assert!(meta.is_expired(5_001));
         assert!(meta.is_expired(1_000_000));
+    }
+
+    #[test]
+    fn deserialize_garbage_returns_error() {
+        let result = ObjectMeta::deserialize(b"not valid bincode data");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("serialization"));
+    }
+
+    #[test]
+    fn deserialize_empty_returns_error() {
+        let result = ObjectMeta::deserialize(b"");
+        assert!(result.is_err());
     }
 
     #[test]

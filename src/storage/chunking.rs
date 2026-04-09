@@ -1,8 +1,12 @@
-//! Transparent value chunking.
+//! Transparent value chunking for the `obj/` subspace.
 //!
 //! Values exceeding 100,000 bytes (FDB's hard limit) are automatically
 //! split into chunks stored at sequential sub-keys. The chunk boundary
 //! is invisible to the command layer.
+//!
+//! Currently hardcoded to the `obj/` subspace via `Directories`. When
+//! hash field values or list elements need chunking (M6+), this module
+//! should be generalized to accept a `DirectorySubspace` parameter.
 
 use foundationdb::Transaction;
 use tracing::debug_span;
@@ -80,6 +84,8 @@ pub async fn read_chunks(
         })
         .collect();
 
+    // Pre-allocate for the common case (last chunk may be smaller,
+    // but the over-allocation is bounded by CHUNK_SIZE).
     let mut result = Vec::with_capacity((num_chunks as usize) * CHUNK_SIZE);
 
     for (i, fut) in futures.into_iter().enumerate() {

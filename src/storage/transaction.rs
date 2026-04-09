@@ -26,7 +26,16 @@ pub enum IsolationMode {
 /// The closure receives a `RetryableTransaction` (which derefs to
 /// `Transaction`) and should perform all reads/writes on it. The
 /// transaction is automatically committed and retried on transient
-/// errors.
+/// errors (conflicts, network issues).
+///
+/// # Idempotency
+///
+/// **The closure may be called multiple times** due to FDB's automatic
+/// retry on transient errors. Callers MUST ensure the closure is
+/// idempotent — it should produce the same result regardless of how
+/// many times it runs. In practice this means: don't perform
+/// side effects outside the transaction (e.g., incrementing an
+/// in-memory counter, sending a network request) inside the closure.
 ///
 /// `operation` is a label used for Prometheus metrics and tracing
 /// spans (e.g. `"GET"`, `"SET"`, `"HSET"`).

@@ -104,21 +104,20 @@ mod accept {
         let result = runner.run(&strategy, |data| {
             let key = unique_key();
 
-            rt.block_on(async {
-                // Write + read in raw transactions (skip run_transact overhead).
+            // Run FDB I/O inside block_on, then assert outside so
+            // prop_assert! can drive proptest shrinking on failure.
+            let (num_chunks, read_back) = rt.block_on(async {
                 let trx = db.inner().create_trx().unwrap();
-                let num_chunks = chunking::write_chunks(&trx, dirs, &key, &data);
-                assert_eq!(num_chunks, chunking::chunk_count(data.len()));
+                let nc = chunking::write_chunks(&trx, dirs, &key, &data);
                 trx.commit().await.unwrap();
 
                 let trx = db.inner().create_trx().unwrap();
-                let result = chunking::read_chunks(&trx, dirs, &key, num_chunks, false)
-                    .await
-                    .unwrap();
-                assert_eq!(result.len(), data.len(), "length mismatch at len={}", data.len());
-                assert!(result == data, "data mismatch at len={}", data.len());
+                let rb = chunking::read_chunks(&trx, dirs, &key, nc, false).await.unwrap();
+                (nc, rb)
             });
 
+            prop_assert_eq!(num_chunks, chunking::chunk_count(data.len()), "chunk count");
+            prop_assert!(read_back == data, "data mismatch at len={}", data.len());
             Ok(())
         });
 
@@ -161,19 +160,19 @@ mod accept {
         let result = runner.run(&strategy, |meta| {
             let key = unique_key();
 
-            rt.block_on(async {
+            let read_meta = rt.block_on(async {
                 let trx = db.inner().create_trx().unwrap();
                 meta.write(&trx, dirs, &key).unwrap();
                 trx.commit().await.unwrap();
 
                 let trx = db.inner().create_trx().unwrap();
-                let read_meta = ObjectMeta::read(&trx, dirs, &key, 0, false)
+                ObjectMeta::read(&trx, dirs, &key, 0, false)
                     .await
                     .unwrap()
-                    .expect("key should exist after write");
-                assert_eq!(read_meta, meta, "ObjectMeta FDB roundtrip mismatch");
+                    .expect("key should exist after write")
             });
 
+            prop_assert_eq!(read_meta, meta, "ObjectMeta FDB roundtrip mismatch");
             Ok(())
         });
 
