@@ -9,7 +9,7 @@
 | M2: TCP Server Shell | **Complete** | Connection handler with read/parse/dispatch/encode/write loop. Pipelining support. PING, ECHO, HELLO, QUIT, COMMAND, CLIENT handlers. 10 unit tests, 6 integration tests, 120 total tests passing. redis-cli verified. |
 | M3: FDB Storage Layer | **Complete** | Database init (Once-guarded boot), FDB directory layer (8 subspaces/namespace), ObjectMeta with bincode serde + lazy expiry, transparent chunking (100KB, parallel reads), instrumented transaction wrapper (Prometheus + tracing). 11 unit tests, 18 integration tests, 3 property tests (350 cases), 2 benchmarks (serialize ~7ns, deserialize ~8ns). 154 total tests, `just test` at ~1s, `just accept` at ~14s. |
 | M4: String Commands | **Complete** | 19 commands (GET, SET, MGET, MSET, DEL, EXISTS, INCR, DECR, INCRBY, DECRBY, INCRBYFLOAT, APPEND, STRLEN, GETRANGE, SETRANGE, SETNX, SETEX, PSETEX, GETDEL). Full SET flags (NX/XX/EX/PX/EXAT/PXAT/KEEPTTL/GET). Async dispatch, FDB-backed ConnectionState, storage helpers module. 65 integration tests, 7 acceptance tests (property-based + randomized), expanded smoke tests, 5 string benchmarks. 222 total tests, `just test` at ~0.7s, `just accept` at ~4s. |
-| M5: Key Management & TTL | Not started | |
+| M5: Key Management & TTL | **Complete** | 18 commands (EXPIRE, PEXPIRE, EXPIREAT, PEXPIREAT, TTL, PTTL, PERSIST, EXPIRETIME, PEXPIRETIME, TYPE, RENAME, RENAMENX, UNLINK, TOUCH, DBSIZE, SELECT, FLUSHDB, FLUSHALL). Background expiry worker (250ms scan, 1000 key batches). NamespaceCache for SELECT. 40 integration tests, 14 acceptance tests. |
 | M6: Hash Commands | Not started | |
 | M7: Set Commands | Not started | |
 | M8: Sorted Set Commands | Not started | |
@@ -121,6 +121,25 @@ SET flag parsing validates all mutual exclusions. TTL computation happens inside
 **Benchmarks** (`benches/commands.rs`) — 5 full-stack benchmarks: set_64b, get_64b, set_get_1kb, incr, mset_10.
 
 **`just test`**: 205 tests in ~0.7s. **`just accept`**: 17 acceptance tests in ~4s.
+
+### What's been built (M5)
+
+**Key management** (`src/commands/keys.rs`, ~1400 lines) — 18 handlers:
+- **TTL operations**: EXPIRE, PEXPIRE, EXPIREAT, PEXPIREAT (shared implementation with type overload), TTL, PTTL (return -2 for missing, -1 for no expiry), PERSIST (clear TTL), EXPIRETIME, PEXPIRETIME (absolute timestamps)
+- **Key operations**: TYPE (returns string type name), RENAME (atomic move), RENAMENX (conditional rename), UNLINK (DEL alias — async tombstone deletion deferred to Phase 2), TOUCH (update last_accessed_ms)
+- **Database operations**: DBSIZE (range-read count on meta/ directory), SELECT (namespace switching with NamespaceCache), FLUSHDB (clear current namespace), FLUSHALL (clear all 16 namespaces)
+
+**Namespace cache** (`src/storage/namespace.rs`) — `NamespaceCache` struct holds directories for all 16 namespaces, lazy-initialized on first SELECT. Wrapped in Arc<Mutex<>> for safe concurrent access across connections. Per-connection state tracks current namespace (0-15).
+
+**Background expiry worker** (`src/ttl/worker.rs`) — Spawned as tokio task on server startup. Every 250ms: scans expire/ directory, processes up to 1000 expired keys per batch. For each expired key: verifies timestamp has passed, deletes meta + data + expire entry. Handles all key types (String, Hash, Set, SortedSet, List) via shared `delete_data_for_meta()` helper. Prometheus metrics: expired_keys_total counter.
+
+**Storage helpers** (`src/storage/helpers.rs`) — Enhanced `delete_data_for_meta()` to handle deletion logic for all key types, used by both DEL command and background expiry worker.
+
+**Integration tests** (`tests/keys.rs`) — 40 tests covering all 18 commands: EXPIRE/TTL/PERSIST/EXPIRETIME round-trips, background expiry timing verification, RENAME atomicity, RENAMENX conditional logic, SELECT namespace isolation, FLUSHDB/FLUSHALL cleanup, DBSIZE accuracy, TYPE returns correct types, TOUCH updates without modifying data, WRONGTYPE enforcement for type-specific expiry operations.
+
+**Acceptance tests** (`tests/accept_keys.rs`) — 14 tests: TTL/EXPIRETIME property tests (100 cases), SELECT isolation with randomized cross-namespace operations (50 cases), FLUSHDB/FLUSHALL correctness, DBSIZE accuracy after randomized SET/DEL sequences (200 cases), RENAME/RENAMENX property tests, randomized key lifecycle sequences (EXPIRE/PERSIST/TYPE/DEL/TOUCH interleaved, verified against in-memory model, 500 ops).
+
+**`just test`**: 253 tests in ~0.8s. **`just accept`**: 31 acceptance tests in ~5.7s.
 
 ---
 
