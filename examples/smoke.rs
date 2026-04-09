@@ -112,9 +112,7 @@ async fn wait_for_ready(addr: &str) -> Result<(), String> {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    Err(format!(
-        "server at {addr} did not become ready within 5 seconds"
-    ))
+    Err(format!("server at {addr} did not become ready within 5 seconds"))
 }
 
 // ===========================================================================
