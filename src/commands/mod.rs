@@ -40,7 +40,7 @@ pub enum CommandResponse {
 /// The command name is already uppercased by `RedisCommand::from_resp()`.
 /// Returns a `CommandResponse` indicating the response to send and
 /// whether the connection should be closed.
-pub fn dispatch(cmd: &RedisCommand, state: &mut ConnectionState) -> CommandResponse {
+pub async fn dispatch(cmd: &RedisCommand, state: &mut ConnectionState) -> CommandResponse {
     match cmd.name.as_ref() {
         b"PING" => CommandResponse::Reply(handle_ping(&cmd.args)),
         b"ECHO" => CommandResponse::Reply(handle_echo(&cmd.args)),
@@ -194,36 +194,36 @@ mod tests {
         }
     }
 
-    fn dispatch_reply(cmd: &RedisCommand) -> RespValue {
-        let mut state = ConnectionState::default();
-        match dispatch(cmd, &mut state) {
+    async fn dispatch_reply(cmd: &RedisCommand) -> RespValue {
+        let mut state = ConnectionState::default_for_test();
+        match dispatch(cmd, &mut state).await {
             CommandResponse::Reply(resp) => resp,
             CommandResponse::Close(resp) => resp,
         }
     }
 
-    #[test]
-    fn ping_no_args() {
+    #[tokio::test]
+    async fn ping_no_args() {
         let cmd = make_cmd(b"PING", vec![]);
         assert_eq!(
-            dispatch_reply(&cmd),
+            dispatch_reply(&cmd).await,
             RespValue::SimpleString(Bytes::from_static(b"PONG"))
         );
     }
 
-    #[test]
-    fn ping_with_message() {
+    #[tokio::test]
+    async fn ping_with_message() {
         let cmd = make_cmd(b"PING", vec![b"hello"]);
         assert_eq!(
-            dispatch_reply(&cmd),
+            dispatch_reply(&cmd).await,
             RespValue::BulkString(Some(Bytes::from_static(b"hello")))
         );
     }
 
-    #[test]
-    fn ping_wrong_arity() {
+    #[tokio::test]
+    async fn ping_wrong_arity() {
         let cmd = make_cmd(b"PING", vec![b"a", b"b"]);
-        match dispatch_reply(&cmd) {
+        match dispatch_reply(&cmd).await {
             RespValue::Error(msg) => {
                 let s = String::from_utf8_lossy(&msg);
                 assert!(s.contains("wrong number of arguments"), "got: {s}");
@@ -232,30 +232,30 @@ mod tests {
         }
     }
 
-    #[test]
-    fn echo_returns_argument() {
+    #[tokio::test]
+    async fn echo_returns_argument() {
         let cmd = make_cmd(b"ECHO", vec![b"world"]);
         assert_eq!(
-            dispatch_reply(&cmd),
+            dispatch_reply(&cmd).await,
             RespValue::BulkString(Some(Bytes::from_static(b"world")))
         );
     }
 
-    #[test]
-    fn unknown_command_returns_error() {
+    #[tokio::test]
+    async fn unknown_command_returns_error() {
         let cmd = make_cmd(b"FAKECMD", vec![]);
-        match dispatch_reply(&cmd) {
+        match dispatch_reply(&cmd).await {
             RespValue::Error(_) => {} // expected
             other => panic!("expected error, got {other:?}"),
         }
     }
 
-    #[test]
-    fn unknown_command_with_crlf_in_name_produces_safe_error() {
+    #[tokio::test]
+    async fn unknown_command_with_crlf_in_name_produces_safe_error() {
         // Regression test: command names with \r\n must be sanitized
         // in error messages to prevent RESP protocol injection.
         let cmd = make_cmd(b"FOO\r\nBAR", vec![b"arg\r\n"]);
-        match dispatch_reply(&cmd) {
+        match dispatch_reply(&cmd).await {
             RespValue::Error(msg) => {
                 let s = String::from_utf8_lossy(&msg);
                 // \r and \n must be escaped, not literal
@@ -268,24 +268,24 @@ mod tests {
         }
     }
 
-    #[test]
-    fn command_dispatch_is_case_insensitive() {
+    #[tokio::test]
+    async fn command_dispatch_is_case_insensitive() {
         // dispatch() expects uppercase names (from_resp uppercases),
         // but verify it matches correctly by sending lowercase through
         // the full RedisCommand::from_resp path.
         let value = RespValue::Array(Some(vec![RespValue::BulkString(Some(Bytes::from_static(b"ping")))]));
         let cmd = RedisCommand::from_resp(value).unwrap();
         assert_eq!(
-            dispatch_reply(&cmd),
+            dispatch_reply(&cmd).await,
             RespValue::SimpleString(Bytes::from_static(b"PONG"))
         );
     }
 
-    #[test]
-    fn hello_defaults_to_resp2() {
+    #[tokio::test]
+    async fn hello_defaults_to_resp2() {
         let cmd = make_cmd(b"HELLO", vec![]);
-        let mut state = ConnectionState::default();
-        let resp = match dispatch(&cmd, &mut state) {
+        let mut state = ConnectionState::default_for_test();
+        let resp = match dispatch(&cmd, &mut state).await {
             CommandResponse::Reply(r) => r,
             other => panic!("expected Reply, got {other:?}"),
         };
@@ -299,23 +299,23 @@ mod tests {
         }
     }
 
-    #[test]
-    fn hello_upgrades_to_resp3() {
+    #[tokio::test]
+    async fn hello_upgrades_to_resp3() {
         let cmd = make_cmd(b"HELLO", vec![b"3"]);
-        let mut state = ConnectionState::default();
+        let mut state = ConnectionState::default_for_test();
         assert_eq!(state.protocol_version, 2);
-        match dispatch(&cmd, &mut state) {
+        match dispatch(&cmd, &mut state).await {
             CommandResponse::Reply(_) => {}
             other => panic!("expected Reply, got {other:?}"),
         }
         assert_eq!(state.protocol_version, 3);
     }
 
-    #[test]
-    fn hello_rejects_invalid_version() {
+    #[tokio::test]
+    async fn hello_rejects_invalid_version() {
         let cmd = make_cmd(b"HELLO", vec![b"4"]);
-        let mut state = ConnectionState::default();
-        match dispatch(&cmd, &mut state) {
+        let mut state = ConnectionState::default_for_test();
+        match dispatch(&cmd, &mut state).await {
             CommandResponse::Reply(RespValue::Error(msg)) => {
                 assert!(msg.as_ref().starts_with(b"NOPROTO"));
             }
@@ -323,11 +323,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn quit_returns_close() {
+    #[tokio::test]
+    async fn quit_returns_close() {
         let cmd = make_cmd(b"QUIT", vec![]);
-        let mut state = ConnectionState::default();
-        match dispatch(&cmd, &mut state) {
+        let mut state = ConnectionState::default_for_test();
+        match dispatch(&cmd, &mut state).await {
             CommandResponse::Close(RespValue::SimpleString(msg)) => {
                 assert_eq!(msg.as_ref(), b"OK");
             }
