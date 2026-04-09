@@ -7,7 +7,7 @@
 | M0: Project Skeleton | **Complete** | All exit criteria met. `just` inner loop at ~1.1s. 8 unit tests passing. |
 | M1: RESP3 Parser/Encoder | **Complete** | 99 unit tests, 15K+ proptest cases, 4 fuzz targets (2.2M+ runs, 0 crashes), criterion benchmarks. Parser: ~37ns simple, ~126ns SET cmd. Encoder: ~12ns simple, ~17ns bulk. 2 bugs found and fixed by fuzzer. |
 | M2: TCP Server Shell | **Complete** | Connection handler with read/parse/dispatch/encode/write loop. Pipelining support. PING, ECHO, HELLO, QUIT, COMMAND, CLIENT handlers. 10 unit tests, 6 integration tests, 120 total tests passing. redis-cli verified. |
-| M3: FDB Storage Layer | Not started | |
+| M3: FDB Storage Layer | **Complete** | Database init (Once-guarded boot), FDB directory layer (8 subspaces/namespace), ObjectMeta with bincode serde + lazy expiry, transparent chunking (100KB, parallel reads), instrumented transaction wrapper (Prometheus + tracing). 11 unit tests, 18 integration tests, 3 property tests (350 cases), 2 benchmarks (serialize ~7ns, deserialize ~8ns). 154 total tests, `just test` at ~1s, `just accept` at ~14s. |
 | M4: String Commands | Not started | |
 | M5: Key Management & TTL | Not started | |
 | M6: Hash Commands | Not started | |
@@ -68,6 +68,28 @@
 **Integration tests** (`tests/server.rs`) — 6 tests covering full TCP round-trip: PING, ECHO, PING with message, pipelining (100 commands), unknown command error, multi-connection independence. Each test uses `TestContext` with real server on random port.
 
 **`just` inner loop**: 120 tests in ~0.04s. **`just accept`**: 7 acceptance tests (15K+ proptest cases) in ~1.6s.
+
+### What's been built (M3)
+
+**Database initialization** (`src/storage/database.rs`) — `boot()` starts the FDB network thread exactly once via `std::sync::Once`, leaking the `NetworkAutoStop` handle for process-lifetime safety. `Database` wraps `foundationdb::Database` in `Arc` with constructors from cluster file path or default.
+
+**Directory layout** (`src/storage/directories.rs`) — `Directories` struct holds 8 `DirectorySubspace` handles (meta, obj, hash, set, zset, zset_idx, list, expire) opened via FDB's directory layer in a single transaction. `root_prefix` parameter enables test isolation (`"kvdb"` in production, `"kvdb_test_<uuid>"` in tests). Helper methods for key construction: `meta_key()`, `obj_chunk_key()`, `expire_key()`, `obj_key_range()`.
+
+**ObjectMeta** (`src/storage/meta.rs`) — Per-key metadata with serde/bincode serialization (~50-60 bytes). `read()` includes lazy expiry check via `now_ms` parameter. `write()` and `delete()` are synchronous (buffer in transaction). 8 unit tests covering all key types, serde roundtrips, and expiry edge cases.
+
+**Value chunking** (`src/storage/chunking.rs`) — Transparent splitting at 100,000-byte boundaries. `write_chunks()` splits and stores sequentially. `read_chunks()` fires parallel `get()` futures for all chunks. `delete_chunks()` uses `clear_range`. 3 unit tests for chunk_count calculations.
+
+**Transaction wrapper** (`src/storage/transaction.rs`) — `run_transact()` wraps FDB's auto-retry `db.run()` with 5-second timeout, Prometheus duration/conflict metrics, and tracing `info_span`.
+
+**Error handling** (`src/error.rs`) — `StorageError` enum with 5 variants (Fdb, FdbBinding, Serialization, DataCorruption, Directory) wired into top-level `Error` via `#[from]`.
+
+**Integration tests** (`tests/storage.rs`) — 18 tests against real FDB: ObjectMeta CRUD (6), chunking at various sizes and boundaries (7), directory verification (4), transaction wrapper (1). Each test isolated via UUID root prefix with automatic cleanup.
+
+**Property tests** (`tests/accept_storage.rs`) — 3 proptest suites: chunk round-trip (100 cases, 0-1MB random data), ObjectMeta serde round-trip (200 cases), ObjectMeta FDB round-trip (50 cases).
+
+**Benchmarks** (`benches/commands.rs`) — ObjectMeta serialize (~7ns) and deserialize (~8ns) via criterion.
+
+**`just test`**: 151 tests in ~1.0s. **`just accept`**: 10 acceptance tests (350 proptest cases) in ~14s.
 
 ---
 
