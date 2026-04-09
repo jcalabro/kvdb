@@ -59,7 +59,7 @@ impl Directories {
 
         let ns_str = namespace.to_string();
 
-        let trx = db.inner().create_trx().map_err(|e| StorageError::Fdb(e))?;
+        let trx = db.inner().create_trx().map_err(StorageError::Fdb)?;
 
         let dir_layer = DirectoryLayer::default();
 

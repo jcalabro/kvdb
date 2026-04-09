@@ -50,7 +50,7 @@ impl Database {
     /// Open a database using the given cluster file path.
     pub fn new(cluster_file: &str) -> crate::error::Result<Self> {
         boot();
-        let db = foundationdb::Database::from_path(cluster_file).map_err(|e| crate::error::StorageError::Fdb(e))?;
+        let db = foundationdb::Database::from_path(cluster_file).map_err(crate::error::StorageError::Fdb)?;
         Ok(Self {
             inner: std::sync::Arc::new(db),
         })
@@ -59,7 +59,7 @@ impl Database {
     /// Open a database using the default cluster file location.
     pub fn new_default() -> crate::error::Result<Self> {
         boot();
-        let db = foundationdb::Database::default().map_err(|e| crate::error::StorageError::Fdb(e))?;
+        let db = foundationdb::Database::default().map_err(crate::error::StorageError::Fdb)?;
         Ok(Self {
             inner: std::sync::Arc::new(db),
         })
