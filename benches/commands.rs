@@ -12,6 +12,7 @@ use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, 
 use kvdb::protocol::encoder::encode;
 use kvdb::protocol::parser::parse;
 use kvdb::protocol::types::RespValue;
+use kvdb::storage::meta::{KeyType, ObjectMeta};
 
 // ---------------------------------------------------------------------------
 // Parser benchmarks
@@ -199,6 +200,37 @@ fn bench_roundtrip(c: &mut Criterion) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// ObjectMeta serialization benchmarks
+// ---------------------------------------------------------------------------
+
+fn bench_meta_serialize(c: &mut Criterion) {
+    let meta = ObjectMeta {
+        key_type: KeyType::String,
+        num_chunks: 5,
+        size_bytes: 500_000,
+        expires_at_ms: 1_700_000_000_000,
+        cardinality: 0,
+        last_accessed_ms: 1_700_000_001_000,
+        list_head: 0,
+        list_tail: 0,
+        list_length: 0,
+    };
+
+    c.bench_function("meta_serialize", |b| {
+        b.iter(|| {
+            let _ = criterion::black_box(&meta).serialize().unwrap();
+        });
+    });
+
+    let bytes = meta.serialize().unwrap();
+    c.bench_function("meta_deserialize", |b| {
+        b.iter(|| {
+            let _ = ObjectMeta::deserialize(criterion::black_box(&bytes)).unwrap();
+        });
+    });
+}
+
 criterion_group! {
     name = benches;
     // Fast feedback: 500ms warmup + 1.5s measurement × 30 samples.
@@ -222,5 +254,6 @@ criterion_group! {
         bench_encode_array,
         bench_encode_resp2_downgrade,
         bench_roundtrip,
+        bench_meta_serialize,
 }
 criterion_main!(benches);
