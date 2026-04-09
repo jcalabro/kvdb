@@ -97,35 +97,40 @@ pub fn write_string(
 
 /// Delete an object of any type for `key`.
 ///
-/// Reads the meta to determine the type, then clears all type-specific
-/// data, the meta entry, and the expire entry. Returns `true` if the
-/// key existed (and was not expired), `false` otherwise.
+/// Reads the meta (without expiry check) to determine the type, then
+/// clears all type-specific data, the meta entry, and the expire entry.
+/// This ensures orphaned expired data is cleaned up. Returns `true` if
+/// the key was live (not expired), `false` otherwise.
 pub async fn delete_object(
     tr: &Transaction,
     dirs: &Directories,
     key: &[u8],
     now_ms: u64,
 ) -> Result<bool, CommandError> {
-    let meta = ObjectMeta::read(tr, dirs, key, now_ms, false)
+    // Read WITHOUT expiry check so we can clean up orphaned data.
+    let meta = ObjectMeta::read(tr, dirs, key, 0, false)
         .await
         .map_err(|e| CommandError::Generic(e.to_string()))?;
 
     let meta = match meta {
         Some(m) => m,
-        None => return Ok(false),
+        None => return Ok(false), // truly doesn't exist
     };
 
+    // Determine if the key was "live" (for the return value).
+    let was_live = now_ms == 0 || !meta.is_expired(now_ms);
+
+    // Always clean up data, meta, and expire entry.
     delete_data_for_meta(tr, dirs, key, &meta);
 
     ObjectMeta::delete(tr, dirs, key).map_err(|e| CommandError::Generic(e.to_string()))?;
 
-    // Clear expire entry if set.
     if meta.expires_at_ms > 0 {
         let expire_key = dirs.expire_key(key);
         tr.clear(&expire_key);
     }
 
-    Ok(true)
+    Ok(was_live)
 }
 
 /// Clear all type-specific data for a key given its metadata.

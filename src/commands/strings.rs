@@ -6,6 +6,7 @@
 //! `run_transact`, and returns a `RespValue` response.
 
 use bytes::Bytes;
+use futures::future::join_all;
 
 use crate::error::CommandError;
 use crate::protocol::types::RespValue;
@@ -17,6 +18,7 @@ use crate::storage::{helpers, run_transact};
 // GET key
 // ---------------------------------------------------------------------------
 
+/// GET key -- Returns the string value of `key`, or nil if the key does not exist.
 pub async fn handle_get(args: &[Bytes], state: &ConnectionState) -> RespValue {
     if args.len() != 1 {
         return RespValue::err(CommandError::WrongArity { name: "GET".into() }.to_string());
@@ -210,6 +212,8 @@ fn parse_positive_i64(arg: &Bytes, cmd_name: &str) -> Result<i64, RespValue> {
     Ok(val)
 }
 
+/// SET key value [NX|XX] [GET] [EX s|PX ms|EXAT s|PXAT ms] [KEEPTTL] --
+/// Sets the string value of `key`. Supports conditional set, TTL, and old-value return.
 pub async fn handle_set(args: &[Bytes], state: &ConnectionState) -> RespValue {
     if args.len() < 2 {
         return RespValue::err(CommandError::WrongArity { name: "SET".into() }.to_string());
@@ -323,6 +327,7 @@ enum SetResult {
 // DEL key [key ...]
 // ---------------------------------------------------------------------------
 
+/// DEL key [key ...] -- Removes the specified keys. Returns the number of keys deleted.
 pub async fn handle_del(args: &[Bytes], state: &ConnectionState) -> RespValue {
     if args.is_empty() {
         return RespValue::err(CommandError::WrongArity { name: "DEL".into() }.to_string());
@@ -358,6 +363,7 @@ pub async fn handle_del(args: &[Bytes], state: &ConnectionState) -> RespValue {
 // EXISTS key [key ...]
 // ---------------------------------------------------------------------------
 
+/// EXISTS key [key ...] -- Returns the number of specified keys that exist.
 pub async fn handle_exists(args: &[Bytes], state: &ConnectionState) -> RespValue {
     if args.is_empty() {
         return RespValue::err(CommandError::WrongArity { name: "EXISTS".into() }.to_string());
@@ -393,6 +399,7 @@ pub async fn handle_exists(args: &[Bytes], state: &ConnectionState) -> RespValue
 // SETNX key value
 // ---------------------------------------------------------------------------
 
+/// SETNX key value -- Sets `key` only if it does not already exist. Returns 1 if set, 0 otherwise.
 pub async fn handle_setnx(args: &[Bytes], state: &ConnectionState) -> RespValue {
     if args.len() != 2 {
         return RespValue::err(CommandError::WrongArity { name: "SETNX".into() }.to_string());
@@ -430,6 +437,7 @@ pub async fn handle_setnx(args: &[Bytes], state: &ConnectionState) -> RespValue 
 // SETEX key seconds value
 // ---------------------------------------------------------------------------
 
+/// SETEX key seconds value -- Sets the value and expiration (in seconds) of `key`.
 pub async fn handle_setex(args: &[Bytes], state: &ConnectionState) -> RespValue {
     if args.len() != 3 {
         return RespValue::err(CommandError::WrongArity { name: "SETEX".into() }.to_string());
@@ -469,6 +477,7 @@ pub async fn handle_setex(args: &[Bytes], state: &ConnectionState) -> RespValue 
 // PSETEX key milliseconds value
 // ---------------------------------------------------------------------------
 
+/// PSETEX key milliseconds value -- Sets the value and expiration (in milliseconds) of `key`.
 pub async fn handle_psetex(args: &[Bytes], state: &ConnectionState) -> RespValue {
     if args.len() != 3 {
         return RespValue::err(CommandError::WrongArity { name: "PSETEX".into() }.to_string());
@@ -508,6 +517,7 @@ pub async fn handle_psetex(args: &[Bytes], state: &ConnectionState) -> RespValue
 // GETDEL key
 // ---------------------------------------------------------------------------
 
+/// GETDEL key -- Returns the string value of `key` and deletes it. Returns nil if the key does not exist.
 pub async fn handle_getdel(args: &[Bytes], state: &ConnectionState) -> RespValue {
     if args.len() != 1 {
         return RespValue::err(CommandError::WrongArity { name: "GETDEL".into() }.to_string());
@@ -548,6 +558,7 @@ pub async fn handle_getdel(args: &[Bytes], state: &ConnectionState) -> RespValue
 // MGET key [key ...]
 // ---------------------------------------------------------------------------
 
+/// MGET key [key ...] -- Returns the values of all specified keys (nil for missing/non-string keys).
 pub async fn handle_mget(args: &[Bytes], state: &ConnectionState) -> RespValue {
     if args.is_empty() {
         return RespValue::err(CommandError::WrongArity { name: "MGET".into() }.to_string());
@@ -560,27 +571,40 @@ pub async fn handle_mget(args: &[Bytes], state: &ConnectionState) -> RespValue {
         let ks = keys.clone();
         async move {
             let now = helpers::now_ms();
-            let mut results: Vec<Option<Vec<u8>>> = Vec::with_capacity(ks.len());
 
-            for k in &ks {
+            // Read all metas in parallel.
+            let meta_futures: Vec<_> = ks.iter().map(|k| ObjectMeta::read(&tr, &dirs, k, now, false)).collect();
+            let metas: Vec<Result<Option<ObjectMeta>, _>> = join_all(meta_futures).await;
+
+            // Collect keys that need chunk reads, fire those in parallel.
+            let mut chunk_futures = Vec::new();
+            let mut chunk_indices = Vec::new();
+            let mut results: Vec<Option<Vec<u8>>> = vec![None; ks.len()];
+
+            for (i, meta_result) in metas.into_iter().enumerate() {
+                let meta = meta_result.map_err(helpers::storage_err)?;
                 // MGET returns nil for non-string keys (no WRONGTYPE error).
-                let meta = ObjectMeta::read(&tr, &dirs, k, now, false)
-                    .await
-                    .map_err(helpers::storage_err)?;
-
-                match meta {
-                    Some(m) if m.key_type == KeyType::String => {
-                        let data =
-                            crate::storage::chunking::read_chunks(&tr, &dirs.obj, k, m.num_chunks, m.size_bytes, false)
-                                .await
-                                .map_err(helpers::storage_err)?;
-                        results.push(Some(data));
-                    }
-                    _ => {
-                        results.push(None);
-                    }
+                if let Some(m) = meta
+                    && m.key_type == KeyType::String
+                {
+                    chunk_indices.push(i);
+                    chunk_futures.push(crate::storage::chunking::read_chunks(
+                        &tr,
+                        &dirs.obj,
+                        &ks[i],
+                        m.num_chunks,
+                        m.size_bytes,
+                        false,
+                    ));
                 }
             }
+
+            let chunk_results = join_all(chunk_futures).await;
+            for (idx, chunk_result) in chunk_indices.into_iter().zip(chunk_results) {
+                let data = chunk_result.map_err(helpers::storage_err)?;
+                results[idx] = Some(data);
+            }
+
             Ok(results)
         }
     })
@@ -604,6 +628,7 @@ pub async fn handle_mget(args: &[Bytes], state: &ConnectionState) -> RespValue {
 // MSET key value [key value ...]
 // ---------------------------------------------------------------------------
 
+/// MSET key value [key value ...] -- Sets multiple keys to their respective values atomically.
 pub async fn handle_mset(args: &[Bytes], state: &ConnectionState) -> RespValue {
     if args.len() < 2 || !args.len().is_multiple_of(2) {
         return RespValue::err(CommandError::WrongArity { name: "MSET".into() }.to_string());
@@ -658,12 +683,17 @@ async fn incr_by_impl(key: Vec<u8>, delta: i64, state: &ConnectionState, cmd_nam
         async move {
             let now = helpers::now_ms();
 
-            // Read existing meta (pass now_ms for expiry check).
-            let meta = ObjectMeta::read(&tr, &dirs, &k, now, false)
+            // Single read with now_ms=0 to get raw meta (even if expired),
+            // then determine liveness from that.
+            let raw_meta = ObjectMeta::read(&tr, &dirs, &k, 0, false)
                 .await
                 .map_err(helpers::storage_err)?;
+            let meta = match &raw_meta {
+                Some(m) if !m.is_expired(now) => Some(m),
+                _ => None,
+            };
 
-            let (current_bytes, expires_at_ms) = match &meta {
+            let (current_bytes, expires_at_ms) = match meta {
                 Some(m) => {
                     if m.key_type != KeyType::String {
                         return Err(helpers::cmd_err(CommandError::WrongType));
@@ -693,12 +723,6 @@ async fn incr_by_impl(key: Vec<u8>, delta: i64, state: &ConnectionState, cmd_nam
             let mut buf = itoa::Buffer::new();
             let new_str = buf.format(new_val);
 
-            // Read raw meta (pass now_ms=0 to see expired keys) so write_string
-            // can properly clean up old data.
-            let raw_meta = ObjectMeta::read(&tr, &dirs, &k, 0, false)
-                .await
-                .map_err(helpers::storage_err)?;
-
             helpers::write_string(&tr, &dirs, &k, new_str.as_bytes(), expires_at_ms, raw_meta.as_ref())
                 .map_err(helpers::cmd_err)?;
 
@@ -716,6 +740,7 @@ async fn incr_by_impl(key: Vec<u8>, delta: i64, state: &ConnectionState, cmd_nam
 // INCR key
 // ---------------------------------------------------------------------------
 
+/// INCR key -- Increments the integer value of `key` by one. Creates the key with value 0 if absent.
 pub async fn handle_incr(args: &[Bytes], state: &ConnectionState) -> RespValue {
     if args.len() != 1 {
         return RespValue::err(CommandError::WrongArity { name: "INCR".into() }.to_string());
@@ -728,6 +753,7 @@ pub async fn handle_incr(args: &[Bytes], state: &ConnectionState) -> RespValue {
 // DECR key
 // ---------------------------------------------------------------------------
 
+/// DECR key -- Decrements the integer value of `key` by one. Creates the key with value 0 if absent.
 pub async fn handle_decr(args: &[Bytes], state: &ConnectionState) -> RespValue {
     if args.len() != 1 {
         return RespValue::err(CommandError::WrongArity { name: "DECR".into() }.to_string());
@@ -740,6 +766,7 @@ pub async fn handle_decr(args: &[Bytes], state: &ConnectionState) -> RespValue {
 // INCRBY key increment
 // ---------------------------------------------------------------------------
 
+/// INCRBY key increment -- Increments the integer value of `key` by `increment`.
 pub async fn handle_incrby(args: &[Bytes], state: &ConnectionState) -> RespValue {
     if args.len() != 2 {
         return RespValue::err(CommandError::WrongArity { name: "INCRBY".into() }.to_string());
@@ -756,6 +783,7 @@ pub async fn handle_incrby(args: &[Bytes], state: &ConnectionState) -> RespValue
 // DECRBY key decrement
 // ---------------------------------------------------------------------------
 
+/// DECRBY key decrement -- Decrements the integer value of `key` by `decrement`.
 pub async fn handle_decrby(args: &[Bytes], state: &ConnectionState) -> RespValue {
     if args.len() != 2 {
         return RespValue::err(CommandError::WrongArity { name: "DECRBY".into() }.to_string());
@@ -798,6 +826,7 @@ fn format_redis_float(val: f64) -> String {
     }
 }
 
+/// INCRBYFLOAT key increment -- Increments the float value of `key` by `increment`.
 pub async fn handle_incrbyfloat(args: &[Bytes], state: &ConnectionState) -> RespValue {
     if args.len() != 2 {
         return RespValue::err(
@@ -834,11 +863,17 @@ pub async fn handle_incrbyfloat(args: &[Bytes], state: &ConnectionState) -> Resp
         async move {
             let now = helpers::now_ms();
 
-            let meta = ObjectMeta::read(&tr, &dirs, &k, now, false)
+            // Single read with now_ms=0 to get raw meta (even if expired),
+            // then determine liveness from that.
+            let raw_meta = ObjectMeta::read(&tr, &dirs, &k, 0, false)
                 .await
                 .map_err(helpers::storage_err)?;
+            let meta = match &raw_meta {
+                Some(m) if !m.is_expired(now) => Some(m),
+                _ => None,
+            };
 
-            let (current_bytes, expires_at_ms) = match &meta {
+            let (current_bytes, expires_at_ms) = match meta {
                 Some(m) => {
                     if m.key_type != KeyType::String {
                         return Err(helpers::cmd_err(CommandError::WrongType));
@@ -868,10 +903,6 @@ pub async fn handle_incrbyfloat(args: &[Bytes], state: &ConnectionState) -> Resp
 
             let formatted = format_redis_float(result);
 
-            let raw_meta = ObjectMeta::read(&tr, &dirs, &k, 0, false)
-                .await
-                .map_err(helpers::storage_err)?;
-
             helpers::write_string(&tr, &dirs, &k, formatted.as_bytes(), expires_at_ms, raw_meta.as_ref())
                 .map_err(helpers::cmd_err)?;
 
@@ -889,6 +920,7 @@ pub async fn handle_incrbyfloat(args: &[Bytes], state: &ConnectionState) -> Resp
 // APPEND key value
 // ---------------------------------------------------------------------------
 
+/// APPEND key value -- Appends `value` to the string at `key`. Returns the new string length.
 pub async fn handle_append(args: &[Bytes], state: &ConnectionState) -> RespValue {
     if args.len() != 2 {
         return RespValue::err(CommandError::WrongArity { name: "APPEND".into() }.to_string());
@@ -904,11 +936,17 @@ pub async fn handle_append(args: &[Bytes], state: &ConnectionState) -> RespValue
         async move {
             let now = helpers::now_ms();
 
-            let meta = ObjectMeta::read(&tr, &dirs, &k, now, false)
+            // Single read with now_ms=0 to get raw meta (even if expired),
+            // then determine liveness from that.
+            let raw_meta = ObjectMeta::read(&tr, &dirs, &k, 0, false)
                 .await
                 .map_err(helpers::storage_err)?;
+            let meta = match &raw_meta {
+                Some(m) if !m.is_expired(now) => Some(m),
+                _ => None,
+            };
 
-            let (mut current, expires_at_ms) = match &meta {
+            let (mut current, expires_at_ms) = match meta {
                 Some(m) => {
                     if m.key_type != KeyType::String {
                         return Err(helpers::cmd_err(CommandError::WrongType));
@@ -924,10 +962,6 @@ pub async fn handle_append(args: &[Bytes], state: &ConnectionState) -> RespValue
 
             current.extend_from_slice(&av);
             let new_len = current.len() as i64;
-
-            let raw_meta = ObjectMeta::read(&tr, &dirs, &k, 0, false)
-                .await
-                .map_err(helpers::storage_err)?;
 
             helpers::write_string(&tr, &dirs, &k, &current, expires_at_ms, raw_meta.as_ref())
                 .map_err(helpers::cmd_err)?;
@@ -946,6 +980,7 @@ pub async fn handle_append(args: &[Bytes], state: &ConnectionState) -> RespValue
 // STRLEN key
 // ---------------------------------------------------------------------------
 
+/// STRLEN key -- Returns the length of the string value stored at `key`, or 0 if absent.
 pub async fn handle_strlen(args: &[Bytes], state: &ConnectionState) -> RespValue {
     if args.len() != 1 {
         return RespValue::err(CommandError::WrongArity { name: "STRLEN".into() }.to_string());
@@ -984,6 +1019,7 @@ pub async fn handle_strlen(args: &[Bytes], state: &ConnectionState) -> RespValue
 // GETRANGE key start end
 // ---------------------------------------------------------------------------
 
+/// GETRANGE key start end -- Returns the substring of the string at `key` between `start` and `end` (inclusive).
 pub async fn handle_getrange(args: &[Bytes], state: &ConnectionState) -> RespValue {
     if args.len() != 3 {
         return RespValue::err(
@@ -1051,6 +1087,7 @@ pub async fn handle_getrange(args: &[Bytes], state: &ConnectionState) -> RespVal
 // SETRANGE key offset value
 // ---------------------------------------------------------------------------
 
+/// SETRANGE key offset value -- Overwrites part of the string at `key` starting at `offset`. Returns the new length.
 pub async fn handle_setrange(args: &[Bytes], state: &ConnectionState) -> RespValue {
     if args.len() != 3 {
         return RespValue::err(
@@ -1088,11 +1125,17 @@ pub async fn handle_setrange(args: &[Bytes], state: &ConnectionState) -> RespVal
         async move {
             let now = helpers::now_ms();
 
-            let meta = ObjectMeta::read(&tr, &dirs, &k, now, false)
+            // Single read with now_ms=0 to get raw meta (even if expired),
+            // then determine liveness from that.
+            let raw_meta = ObjectMeta::read(&tr, &dirs, &k, 0, false)
                 .await
                 .map_err(helpers::storage_err)?;
+            let meta = match &raw_meta {
+                Some(m) if !m.is_expired(now) => Some(m),
+                _ => None,
+            };
 
-            let (mut current, expires_at_ms) = match &meta {
+            let (mut current, expires_at_ms) = match meta {
                 Some(m) => {
                     if m.key_type != KeyType::String {
                         return Err(helpers::cmd_err(CommandError::WrongType));
@@ -1116,10 +1159,6 @@ pub async fn handle_setrange(args: &[Bytes], state: &ConnectionState) -> RespVal
             current[off..off + p.len()].copy_from_slice(&p);
 
             let new_len = current.len() as i64;
-
-            let raw_meta = ObjectMeta::read(&tr, &dirs, &k, 0, false)
-                .await
-                .map_err(helpers::storage_err)?;
 
             helpers::write_string(&tr, &dirs, &k, &current, expires_at_ms, raw_meta.as_ref())
                 .map_err(helpers::cmd_err)?;

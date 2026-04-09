@@ -1335,3 +1335,99 @@ async fn large_value_set_get_returns_old() {
     let val: String = redis::cmd("GET").arg("bigkey").query_async(&mut con).await.unwrap();
     assert_eq!(val, "new_val");
 }
+
+// ---------------------------------------------------------------------------
+// Additional WRONGTYPE enforcement tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn getrange_wrongtype_error() {
+    let ctx = TestContext::new().await;
+    ctx.write_fake_meta("hashkey", kvdb::storage::KeyType::Hash).await;
+    let mut con = ctx.connection().await;
+    let result: redis::RedisResult<String> = redis::cmd("GETRANGE")
+        .arg("hashkey")
+        .arg("0")
+        .arg("-1")
+        .query_async(&mut con)
+        .await;
+    assert!(result.is_err());
+    assert!(format!("{}", result.unwrap_err()).contains("WRONGTYPE"));
+}
+
+#[tokio::test]
+async fn setrange_wrongtype_error() {
+    let ctx = TestContext::new().await;
+    ctx.write_fake_meta("hashkey", kvdb::storage::KeyType::Hash).await;
+    let mut con = ctx.connection().await;
+    let result: redis::RedisResult<i64> = redis::cmd("SETRANGE")
+        .arg("hashkey")
+        .arg("0")
+        .arg("x")
+        .query_async(&mut con)
+        .await;
+    assert!(result.is_err());
+    assert!(format!("{}", result.unwrap_err()).contains("WRONGTYPE"));
+}
+
+#[tokio::test]
+async fn strlen_wrongtype_error() {
+    let ctx = TestContext::new().await;
+    ctx.write_fake_meta("hashkey", kvdb::storage::KeyType::Hash).await;
+    let mut con = ctx.connection().await;
+    let result: redis::RedisResult<i64> = redis::cmd("STRLEN").arg("hashkey").query_async(&mut con).await;
+    assert!(result.is_err());
+    assert!(format!("{}", result.unwrap_err()).contains("WRONGTYPE"));
+}
+
+#[tokio::test]
+async fn getdel_wrongtype_error() {
+    let ctx = TestContext::new().await;
+    ctx.write_fake_meta("hashkey", kvdb::storage::KeyType::Hash).await;
+    let mut con = ctx.connection().await;
+    let result: redis::RedisResult<String> = redis::cmd("GETDEL").arg("hashkey").query_async(&mut con).await;
+    assert!(result.is_err());
+    assert!(format!("{}", result.unwrap_err()).contains("WRONGTYPE"));
+}
+
+#[tokio::test]
+async fn incrbyfloat_wrongtype_error() {
+    let ctx = TestContext::new().await;
+    ctx.write_fake_meta("hashkey", kvdb::storage::KeyType::Hash).await;
+    let mut con = ctx.connection().await;
+    let result: redis::RedisResult<String> = redis::cmd("INCRBYFLOAT")
+        .arg("hashkey")
+        .arg("1.0")
+        .query_async(&mut con)
+        .await;
+    assert!(result.is_err());
+    assert!(format!("{}", result.unwrap_err()).contains("WRONGTYPE"));
+}
+
+// ---------------------------------------------------------------------------
+// Edge case tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn decrby_i64_min_delta_returns_error() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+    let _: () = redis::cmd("SET").arg("k").arg("0").query_async(&mut con).await.unwrap();
+    let result: redis::RedisResult<i64> = redis::cmd("DECRBY")
+        .arg("k")
+        .arg("-9223372036854775808")
+        .query_async(&mut con)
+        .await;
+    assert!(result.is_err(), "DECRBY with i64::MIN should overflow on negation");
+}
+
+#[tokio::test]
+async fn binary_keys_are_safe() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+    let key: &[u8] = &[0u8, 1, 2, 255, 0, 128];
+    let val: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF];
+    let _: () = redis::cmd("SET").arg(key).arg(val).query_async(&mut con).await.unwrap();
+    let got: Vec<u8> = redis::cmd("GET").arg(key).query_async(&mut con).await.unwrap();
+    assert_eq!(got, val);
+}

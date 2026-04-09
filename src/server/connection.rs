@@ -29,10 +29,6 @@ const INITIAL_BUF_CAPACITY: usize = 8 * 1024;
 /// huge payloads (up to the parser's 512MB bulk string limit) to
 /// exhaust server memory. 64MB is generous for any legitimate Redis
 /// workload.
-///
-/// TODO(M4): enforce in run_loop() once we have data commands that
-/// exercise large values. For now just documents the intended limit.
-#[allow(dead_code)]
 const MAX_READ_BUF_SIZE: usize = 64 * 1024 * 1024;
 
 /// Per-connection state.
@@ -132,6 +128,11 @@ async fn run_loop(socket: &mut TcpStream, addr: SocketAddr, db: Database, dirs: 
     loop {
         let bytes_read = socket.read_buf(&mut read_buf).await?;
         if bytes_read == 0 {
+            return Ok(());
+        }
+
+        if read_buf.len() > MAX_READ_BUF_SIZE {
+            warn!(%addr, buf_size = read_buf.len(), "read buffer exceeded limit, closing connection");
             return Ok(());
         }
 
