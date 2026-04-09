@@ -53,8 +53,15 @@ pub struct Directories {
 impl Directories {
     /// Open (or create) all 8 directory subspaces for `namespace`
     /// inside a single FDB transaction.
-    pub async fn open(db: &super::database::Database, namespace: u8) -> Result<Self, StorageError> {
-        let span = info_span!("dir_open", ns = namespace);
+    ///
+    /// `root_prefix` is the top-level directory name — `"kvdb"` in
+    /// production, `"kvdb_test_<uuid>"` in tests for isolation.
+    pub async fn open(
+        db: &super::database::Database,
+        namespace: u8,
+        root_prefix: &str,
+    ) -> Result<Self, StorageError> {
+        let span = info_span!("dir_open", ns = namespace, root = root_prefix);
         let _enter = span.enter();
 
         let ns_str = namespace.to_string();
@@ -66,7 +73,7 @@ impl Directories {
         let mut subspaces: Vec<DirectorySubspace> = Vec::with_capacity(8);
 
         for name in &SUBSPACE_NAMES {
-            let path = vec!["kvdb".to_string(), ns_str.clone(), (*name).to_string()];
+            let path = vec![root_prefix.to_string(), ns_str.clone(), (*name).to_string()];
 
             let output = dir_layer
                 .create_or_open(&trx, &path, None, None)

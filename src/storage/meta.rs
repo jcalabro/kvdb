@@ -89,7 +89,11 @@ impl ObjectMeta {
     }
 
     /// Read ObjectMeta for `key` from FDB. Returns `None` if the key
-    /// does not exist.
+    /// does not exist or has expired (lazy expiry check).
+    ///
+    /// `now_ms` is the current time in milliseconds for the lazy expiry
+    /// check. Pass 0 to skip the expiry check (useful in contexts where
+    /// you want to read expired metadata, e.g. background cleanup).
     ///
     /// Uses a snapshot read when `snapshot` is true (avoids adding to
     /// the transaction's conflict set).
@@ -97,6 +101,7 @@ impl ObjectMeta {
         tr: &Transaction,
         dirs: &Directories,
         key: &[u8],
+        now_ms: u64,
         snapshot: bool,
     ) -> Result<Option<Self>, StorageError> {
         let _span = trace_span!("meta_read").entered();
@@ -108,7 +113,11 @@ impl ObjectMeta {
             None => Ok(None),
             Some(slice) => {
                 let meta = Self::deserialize(&slice)?;
-                Ok(Some(meta))
+                if now_ms > 0 && meta.is_expired(now_ms) {
+                    Ok(None)
+                } else {
+                    Ok(Some(meta))
+                }
             }
         }
     }
