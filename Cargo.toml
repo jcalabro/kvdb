@@ -48,6 +48,9 @@ tokio = { version = "1", features = ["full", "test-util"] }
 rand = "0.8"
 uuid = { version = "1", features = ["v4"] }
 
+[profile.release]
+debug = true   # DWARF debug info in release builds — enables Tracy assembly view
+
 [[bench]]
 name = "commands"
 harness = false

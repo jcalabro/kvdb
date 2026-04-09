@@ -15,7 +15,7 @@
 
 use foundationdb::directory::DirectorySubspace;
 use foundationdb::directory::{Directory, DirectoryLayer};
-use tracing::info_span;
+use tracing::{Instrument, info_span};
 
 use crate::error::StorageError;
 
@@ -87,51 +87,54 @@ impl Directories {
     /// production, `"kvdb_test_<uuid>"` in tests for isolation.
     pub async fn open(db: &super::database::Database, namespace: u8, root_prefix: &str) -> Result<Self, StorageError> {
         let span = info_span!("dir_open", ns = namespace, root = root_prefix);
-        let _enter = span.enter();
 
-        let ns_str = namespace.to_string();
+        async {
+            let ns_str = namespace.to_string();
 
-        let trx = db.inner().create_trx().map_err(StorageError::Fdb)?;
+            let trx = db.inner().create_trx().map_err(StorageError::Fdb)?;
 
-        let dir_layer = DirectoryLayer::default();
+            let dir_layer = DirectoryLayer::default();
 
-        let mut subspaces: Vec<DirectorySubspace> = Vec::with_capacity(8);
+            let mut subspaces: Vec<DirectorySubspace> = Vec::with_capacity(8);
 
-        for name in &SUBSPACE_NAMES {
-            let path = vec![root_prefix.to_string(), ns_str.clone(), (*name).to_string()];
+            for name in &SUBSPACE_NAMES {
+                let path = vec![root_prefix.to_string(), ns_str.clone(), (*name).to_string()];
 
-            let output = dir_layer
-                .create_or_open(&trx, &path, None, None)
-                .await
-                .map_err(|e| StorageError::Directory(format!("{e:?}")))?;
+                let output = dir_layer
+                    .create_or_open(&trx, &path, None, None)
+                    .await
+                    .map_err(|e| StorageError::Directory(format!("{e:?}")))?;
 
-            match output {
-                foundationdb::directory::DirectoryOutput::DirectorySubspace(ds) => {
-                    subspaces.push(ds);
-                }
-                _ => {
-                    return Err(StorageError::Directory(
-                        "expected DirectorySubspace, got DirectoryPartition".to_string(),
-                    ));
+                match output {
+                    foundationdb::directory::DirectoryOutput::DirectorySubspace(ds) => {
+                        subspaces.push(ds);
+                    }
+                    _ => {
+                        return Err(StorageError::Directory(
+                            "expected DirectorySubspace, got DirectoryPartition".to_string(),
+                        ));
+                    }
                 }
             }
+
+            trx.commit().await.map_err(|e| StorageError::Fdb(e.into()))?;
+
+            // SUBSPACE_NAMES order: meta, obj, hash, set, zset, zset_idx, list, expire
+            Ok(Self {
+                namespace,
+                root_prefix: root_prefix.to_string(),
+                meta: subspaces.remove(0),
+                obj: subspaces.remove(0),
+                hash: subspaces.remove(0),
+                set: subspaces.remove(0),
+                zset: subspaces.remove(0),
+                zset_idx: subspaces.remove(0),
+                list: subspaces.remove(0),
+                expire: subspaces.remove(0),
+            })
         }
-
-        trx.commit().await.map_err(|e| StorageError::Fdb(e.into()))?;
-
-        // SUBSPACE_NAMES order: meta, obj, hash, set, zset, zset_idx, list, expire
-        Ok(Self {
-            namespace,
-            root_prefix: root_prefix.to_string(),
-            meta: subspaces.remove(0),
-            obj: subspaces.remove(0),
-            hash: subspaces.remove(0),
-            set: subspaces.remove(0),
-            zset: subspaces.remove(0),
-            zset_idx: subspaces.remove(0),
-            list: subspaces.remove(0),
-            expire: subspaces.remove(0),
-        })
+        .instrument(span)
+        .await
     }
 
     /// Build the FDB key for a meta entry: `<meta_prefix> + pack(key)`.

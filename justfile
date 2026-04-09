@@ -85,6 +85,10 @@ smoke:
     wait $SERVER_PID 2>/dev/null || true
     exit $STATUS
 
+# Run load generator against a live server (default 10s, 32 connections)
+loadgen seconds="10" connections="32" addr="127.0.0.1:6379":
+    cargo run --release --example loadgen -- --seconds {{seconds}} --connections {{connections}} --addr {{addr}}
+
 # Run the server locally (debug mode)
 run *ARGS:
     cargo run {{ARGS}}

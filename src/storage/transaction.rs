@@ -5,7 +5,7 @@
 
 use foundationdb::options::TransactionOption;
 use foundationdb::{FdbBindingError, RetryableTransaction};
-use tracing::info_span;
+use tracing::{Instrument, info_span};
 
 use crate::error::{CommandError, StorageError};
 use crate::observability::metrics::FDB_TRANSACTION_DURATION_SECONDS;
@@ -49,50 +49,53 @@ where
     Fut: std::future::Future<Output = Result<T, FdbBindingError>>,
 {
     let span = info_span!("fdb_transact", op = operation);
-    let _enter = span.enter();
 
-    let timer = std::time::Instant::now();
+    async {
+        let timer = std::time::Instant::now();
 
-    let op_str = operation.to_owned();
-    let result: Result<T, FdbBindingError> = db
-        .inner()
-        .run(|tr, _maybe_committed| {
-            // Set 5-second timeout on each attempt.
-            let _ = tr.set_option(TransactionOption::Timeout(5000));
-            closure(tr)
-        })
-        .await;
+        let op_str = operation.to_owned();
+        let result: Result<T, FdbBindingError> = db
+            .inner()
+            .run(|tr, _maybe_committed| {
+                // Set 5-second timeout on each attempt.
+                let _ = tr.set_option(TransactionOption::Timeout(5000));
+                closure(tr)
+            })
+            .await;
 
-    let elapsed = timer.elapsed().as_secs_f64();
+        let elapsed = timer.elapsed().as_secs_f64();
 
-    match &result {
-        Ok(_) => {
-            FDB_TRANSACTION_DURATION_SECONDS
-                .with_label_values(&[op_str.as_str(), "committed"])
-                .observe(elapsed);
-        }
-        Err(e) => {
-            let status = if e.get_fdb_error().is_some_and(|f| f.is_retryable()) {
-                "conflict"
-            } else {
-                "error"
-            };
-            FDB_TRANSACTION_DURATION_SECONDS
-                .with_label_values(&[op_str.as_str(), status])
-                .observe(elapsed);
-        }
-    }
-
-    result.map_err(|e| match e {
-        FdbBindingError::NonRetryableFdbError(fdb_err) => StorageError::Fdb(fdb_err),
-        FdbBindingError::CustomError(boxed) => {
-            // Try to extract a CommandError (e.g. WrongType) to preserve
-            // the original Redis error prefix on the wire.
-            match boxed.downcast::<CommandError>() {
-                Ok(cmd_err) => StorageError::Command(*cmd_err),
-                Err(other) => StorageError::FdbBinding(format!("{other}")),
+        match &result {
+            Ok(_) => {
+                FDB_TRANSACTION_DURATION_SECONDS
+                    .with_label_values(&[op_str.as_str(), "committed"])
+                    .observe(elapsed);
+            }
+            Err(e) => {
+                let status = if e.get_fdb_error().is_some_and(|f| f.is_retryable()) {
+                    "conflict"
+                } else {
+                    "error"
+                };
+                FDB_TRANSACTION_DURATION_SECONDS
+                    .with_label_values(&[op_str.as_str(), status])
+                    .observe(elapsed);
             }
         }
-        other => StorageError::FdbBinding(format!("{other}")),
-    })
+
+        result.map_err(|e| match e {
+            FdbBindingError::NonRetryableFdbError(fdb_err) => StorageError::Fdb(fdb_err),
+            FdbBindingError::CustomError(boxed) => {
+                // Try to extract a CommandError (e.g. WrongType) to preserve
+                // the original Redis error prefix on the wire.
+                match boxed.downcast::<CommandError>() {
+                    Ok(cmd_err) => StorageError::Command(*cmd_err),
+                    Err(other) => StorageError::FdbBinding(format!("{other}")),
+                }
+            }
+            other => StorageError::FdbBinding(format!("{other}")),
+        })
+    }
+    .instrument(span)
+    .await
 }

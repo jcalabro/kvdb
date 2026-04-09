@@ -22,6 +22,49 @@ use tracing_subscriber::{EnvFilter, Layer, Registry};
 
 use super::{LogFormat, ObservabilityConfig};
 
+// ---------------------------------------------------------------------------
+// Tracy field formatter: newtype wrapper to avoid FormattedFields collision
+// ---------------------------------------------------------------------------
+//
+// Both the `fmt` layer and `TracyLayer` default to `DefaultFields` as their
+// field formatter. `tracing-subscriber` stores formatted fields in span
+// extensions keyed by `FormattedFields<F>` — so when both layers use the same
+// `F`, the fmt layer (which runs first) inserts its ANSI-encoded fields and
+// the TracyLayer reuses them, leaking escape codes into Tracy zone names.
+//
+// Wrapping `DefaultFields` in a newtype gives the TracyLayer a distinct type
+// key (`FormattedFields<TracyFieldFormatter>`) that never collides with the
+// fmt layer's `FormattedFields<DefaultFields>`.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "tracy")]
+struct TracyFieldFormatter(tracing_subscriber::fmt::format::DefaultFields);
+
+#[cfg(feature = "tracy")]
+impl<'writer> tracing_subscriber::fmt::FormatFields<'writer> for TracyFieldFormatter {
+    fn format_fields<R: tracing_subscriber::field::RecordFields>(
+        &self,
+        writer: tracing_subscriber::fmt::format::Writer<'writer>,
+        fields: R,
+    ) -> std::fmt::Result {
+        self.0.format_fields(writer, fields)
+    }
+}
+
+#[cfg(feature = "tracy")]
+struct TracyConfig {
+    fmt: TracyFieldFormatter,
+}
+
+#[cfg(feature = "tracy")]
+impl tracing_tracy::Config for TracyConfig {
+    type Formatter = TracyFieldFormatter;
+
+    fn formatter(&self) -> &Self::Formatter {
+        &self.fmt
+    }
+}
+
 /// Initialize the global tracing subscriber.
 ///
 /// Returns the OTEL tracer provider (if configured) so the caller can
@@ -63,7 +106,9 @@ pub fn init_tracing(
     // Optional: Tracy profiler layer (requires `--features tracy` at compile time).
     #[cfg(feature = "tracy")]
     if config.tracy {
-        layers.push(Box::new(tracing_tracy::TracyLayer::default()));
+        layers.push(Box::new(tracing_tracy::TracyLayer::new(TracyConfig {
+            fmt: TracyFieldFormatter(tracing_subscriber::fmt::format::DefaultFields::new()),
+        })));
     }
     #[cfg(not(feature = "tracy"))]
     if config.tracy {
