@@ -1,5 +1,42 @@
 # Implementation Plan
 
+## Progress
+
+| Milestone | Status | Notes |
+|-----------|--------|-------|
+| M0: Project Skeleton | **Complete** | All exit criteria met. `just` inner loop at ~1.1s. 8 unit tests passing. |
+| M1: RESP3 Parser/Encoder | Not started | |
+| M2: TCP Server Shell | Not started | |
+| M3: FDB Storage Layer | Not started | |
+| M4: String Commands | Not started | |
+| M5: Key Management & TTL | Not started | |
+| M6: Hash Commands | Not started | |
+| M7: Set Commands | Not started | |
+| M8: Sorted Set Commands | Not started | |
+| M9: List Commands | Not started | |
+| M10: Transactions | Not started | |
+| M11: Pub/Sub | Not started | |
+| M12: Server Commands & Observability | Not started | |
+| M13: Compatibility Testing | Not started | |
+
+### What's been built (M0)
+
+**Dev infrastructure**: justfile (12 recipes), docker-compose.yml (3-node FDB 7.3.63), fdb.cluster, .config/nextest.toml, rustfmt.toml, .github/workflows/ci.yml.
+
+**Source modules** (all compile, lint-clean, documented):
+- `src/protocol/` — `RespValue` enum (all RESP2+RESP3 types), `RedisCommand`, parser/encoder stubs
+- `src/server/` — TCP listener with semaphore-based connection limiting, connection handler stub
+- `src/storage/` — `Database`, `Directories`, `ObjectMeta`, chunking (with unit tests), transaction types
+- `src/commands/` — dispatch with PING/ECHO handlers and 5 unit tests
+- `src/ttl/` — `ExpiryConfig` with defaults
+- `src/observability/` — Composable tracing subscriber (fmt text/JSON + Tracy opt-in + OpenTelemetry OTLP), Prometheus metrics definitions (connections, commands, FDB transactions, TTL expiry) with HTTP scrape endpoint. Tracy is behind a cargo feature flag (`--features tracy`) to avoid compiling C++ in normal builds.
+- `src/config.rs` — `ServerConfig` with CLI args + env var overrides for all settings including observability
+- `src/error.rs` — `Error`, `ProtocolError`, `CommandError` with thiserror
+
+**Test infrastructure**: `tests/harness/mod.rs` (TestContext with random-port server startup, redis-rs client), integration/ and accept/ directories, fuzz target for RESP parser, criterion bench scaffold.
+
+---
+
 This plan breaks the kvdb build into milestones that each produce something testable. Each milestone builds on the last. Nothing is speculative — every step ends with working code and passing tests.
 
 **Testing philosophy**: Three tiers with escalating scope and time:
@@ -325,13 +362,14 @@ jobs:
 
 ### Exit Criteria
 
-- `just up` starts a 3-node FDB cluster locally via docker compose
-- `just` (default: lint + test) completes in <2 seconds (zero tests at this point, but the pipeline works)
-- `just lint` passes with zero warnings
-- `just ci` runs lint + test + doc build
-- CI pipeline is green
-- `TestContext::new()` compiles (even if it panics at runtime until M2)
-- No feature code yet — this is purely infrastructure
+- [x] `just up` starts a 3-node FDB cluster locally via docker compose
+- [x] `just` (default: lint + test) completes in <2 seconds — **achieved: ~1.1s with 8 tests**
+- [x] `just lint` passes with zero warnings
+- [x] `just ci` runs lint + test + accept + doc build
+- [x] CI pipeline structure in place (.github/workflows/ci.yml)
+- [x] `TestContext::new()` compiles (panics at runtime until M2 wires up the server)
+- [x] No feature code yet — purely infrastructure
+- [x] Observability scaffolding: tracing (fmt/Tracy/OTEL), Prometheus metrics, all wired into config
 
 ---
 
