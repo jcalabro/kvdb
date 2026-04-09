@@ -23,6 +23,17 @@ use crate::protocol::{encoder, parser};
 /// Initial capacity for per-connection read and write buffers.
 const INITIAL_BUF_CAPACITY: usize = 8 * 1024;
 
+/// Maximum size of the per-connection read buffer before the server
+/// closes the connection. Prevents a malicious client from sending
+/// huge payloads (up to the parser's 512MB bulk string limit) to
+/// exhaust server memory. 64MB is generous for any legitimate Redis
+/// workload.
+///
+/// TODO(M4): enforce in run_loop() once we have data commands that
+/// exercise large values. For now just documents the intended limit.
+#[allow(dead_code)]
+const MAX_READ_BUF_SIZE: usize = 64 * 1024 * 1024;
+
 /// Per-connection state.
 ///
 /// Tracks the negotiated protocol version and selected database.
@@ -112,15 +123,32 @@ async fn run_loop(socket: &mut TcpStream, addr: SocketAddr) -> anyhow::Result<()
     }
 }
 
+/// Known command names for safe use as Prometheus metric labels.
+/// Unknown commands are bucketed under "UNKNOWN" to prevent
+/// label cardinality attacks (a client sending millions of unique
+/// invalid command names would create unbounded metric series).
+fn metric_label_for_command(name: &[u8]) -> &'static str {
+    match name {
+        b"PING" => "PING",
+        b"ECHO" => "ECHO",
+        b"HELLO" => "HELLO",
+        b"QUIT" => "QUIT",
+        b"COMMAND" => "COMMAND",
+        b"CLIENT" => "CLIENT",
+        // Future commands added here as they're implemented
+        _ => "UNKNOWN",
+    }
+}
+
 /// Dispatch a single parsed RESP value as a command.
 ///
 /// Returns `true` if the connection should be closed after flushing.
 fn dispatch_one(value: RespValue, state: &mut ConnectionState, write_buf: &mut BytesMut) -> bool {
     match RedisCommand::from_resp(value) {
         Ok(cmd) => {
-            let cmd_name = String::from_utf8_lossy(&cmd.name).to_string();
+            let label = metric_label_for_command(&cmd.name);
             let timer = metrics::COMMAND_DURATION_SECONDS
-                .with_label_values(&[&cmd_name])
+                .with_label_values(&[label])
                 .start_timer();
 
             let (response, close) = match commands::dispatch(&cmd, state) {
@@ -133,9 +161,7 @@ fn dispatch_one(value: RespValue, state: &mut ConnectionState, write_buf: &mut B
             } else {
                 "ok"
             };
-            metrics::COMMANDS_TOTAL
-                .with_label_values(&[cmd_name.as_str(), status])
-                .inc();
+            metrics::COMMANDS_TOTAL.with_label_values(&[label, status]).inc();
 
             encoder::encode_into(write_buf, &response, state.protocol_version);
             timer.observe_duration();

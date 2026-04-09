@@ -10,6 +10,7 @@ use tokio::sync::Semaphore;
 use tracing::{error, info};
 
 use crate::config::ServerConfig;
+use crate::observability::metrics;
 use crate::server::connection;
 
 /// Run the main server loop: accept connections and dispatch handlers.
@@ -32,6 +33,9 @@ pub async fn run(config: ServerConfig, shutdown: tokio::sync::broadcast::Receive
                 let permit = match semaphore.clone().try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(_) => {
+                        metrics::CONNECTIONS_TOTAL
+                            .with_label_values(&["rejected_limit"])
+                            .inc();
                         // At connection limit — drop the socket immediately.
                         // The client sees a connection reset.
                         drop(socket);

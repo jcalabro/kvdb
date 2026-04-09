@@ -147,6 +147,18 @@ async fn main() -> ExitCode {
         Err(e) => t.fail("COMMAND DOCS responds", &format!("error: {e}")),
     }
 
+    // ── HELLO ───────────────────────────────────────────────────
+    println!("HELLO");
+
+    let result: redis::RedisResult<redis::Value> = redis::cmd("HELLO").query_async(&mut con).await;
+    match result {
+        Ok(_) => t.pass("HELLO returns server info"),
+        Err(e) => t.fail("HELLO returns server info", &format!("error: {e}")),
+    }
+
+    let result: redis::RedisResult<redis::Value> = redis::cmd("HELLO").arg("99").query_async(&mut con).await;
+    t.check_err("HELLO rejects invalid protocol version", result);
+
     // ── CLIENT stubs ───────────────────────────────────────────
     println!("CLIENT");
 

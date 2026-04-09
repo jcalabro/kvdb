@@ -19,7 +19,7 @@ ci: lint test accept
 
 # Run clippy and format check
 lint:
-    cargo clippy --workspace --tests -- -D warnings
+    cargo clippy --workspace --tests --examples -- -D warnings
     cargo fmt --check
 
 # Stand up local FDB cluster via docker compose, configure if first run

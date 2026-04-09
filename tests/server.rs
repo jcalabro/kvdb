@@ -99,3 +99,40 @@ async fn multiple_connections_independent() {
         .unwrap();
     assert_eq!(result3, "connection1");
 }
+
+#[tokio::test]
+async fn ping_wrong_arity_returns_error() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+    let result: redis::RedisResult<String> = redis::cmd("PING").arg("a").arg("b").query_async(&mut con).await;
+    assert!(result.is_err(), "PING with 2 args should error");
+}
+
+#[tokio::test]
+async fn hello_negotiates_protocol() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // HELLO without args should return server info
+    let result: redis::Value = redis::cmd("HELLO").query_async(&mut con).await.unwrap();
+    // In RESP2 mode, the Map is downgraded to a flat array
+    match result {
+        redis::Value::Array(ref items) => {
+            // Flat array of key-value pairs: ["server", "kvdb", "version", "0.1.0", ...]
+            assert!(
+                items.len() >= 4,
+                "expected at least 4 items in HELLO response, got {}",
+                items.len()
+            );
+        }
+        _ => panic!("expected array from HELLO, got {result:?}"),
+    }
+}
+
+#[tokio::test]
+async fn hello_rejects_invalid_protocol_version() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+    let result: redis::RedisResult<redis::Value> = redis::cmd("HELLO").arg("99").query_async(&mut con).await;
+    assert!(result.is_err(), "HELLO with invalid version should error");
+}

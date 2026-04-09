@@ -36,18 +36,22 @@ pub fn dispatch(cmd: &RedisCommand, state: &mut ConnectionState) -> CommandRespo
         b"CLIENT" => CommandResponse::Reply(handle_client(&cmd.args)),
         _ => {
             let name_str = String::from_utf8_lossy(&cmd.name);
-            CommandResponse::Reply(RespValue::Error(Bytes::from(format!(
-                "ERR unknown command '{name_str}', with args beginning with: "
-            ))))
+            let mut msg = format!("ERR unknown command '{name_str}', with args beginning with:");
+            for arg in cmd.args.iter().take(3) {
+                msg.push_str(&format!(" '{}'", String::from_utf8_lossy(arg)));
+            }
+            CommandResponse::Reply(RespValue::Error(Bytes::from(msg)))
         }
     }
 }
 
 fn handle_ping(args: &[Bytes]) -> RespValue {
-    if args.is_empty() {
-        RespValue::SimpleString(Bytes::from_static(b"PONG"))
-    } else {
-        RespValue::BulkString(Some(args[0].clone()))
+    match args.len() {
+        0 => RespValue::SimpleString(Bytes::from_static(b"PONG")),
+        1 => RespValue::BulkString(Some(args[0].clone())),
+        _ => RespValue::Error(Bytes::from(
+            CommandError::WrongArity { name: "PING".into() }.to_string(),
+        )),
     }
 }
 
@@ -65,6 +69,11 @@ fn handle_echo(args: &[Bytes]) -> RespValue {
 /// Negotiates protocol version and returns server info. If protover
 /// is 3, switches the connection to RESP3 encoding. If omitted or 2,
 /// stays on RESP2.
+///
+/// NOTE: AUTH and SETNAME sub-arguments are silently ignored for now.
+/// AUTH support is planned for M12. This is safe because clients that
+/// send AUTH in HELLO will still get a successful response — they just
+/// won't be authenticated (no auth is required until M12).
 fn handle_hello(args: &[Bytes], state: &mut ConnectionState) -> RespValue {
     let proto = if args.is_empty() {
         state.protocol_version
@@ -195,6 +204,18 @@ mod tests {
             dispatch_reply(&cmd),
             RespValue::BulkString(Some(Bytes::from_static(b"hello")))
         );
+    }
+
+    #[test]
+    fn ping_wrong_arity() {
+        let cmd = make_cmd(b"PING", vec![b"a", b"b"]);
+        match dispatch_reply(&cmd) {
+            RespValue::Error(msg) => {
+                let s = String::from_utf8_lossy(&msg);
+                assert!(s.contains("wrong number of arguments"), "got: {s}");
+            }
+            other => panic!("expected error, got {other:?}"),
+        }
     }
 
     #[test]
