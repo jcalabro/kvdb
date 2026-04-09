@@ -87,7 +87,7 @@ async fn meta_operations() {
     trx.commit().await.unwrap();
 
     let trx = db.inner().create_trx().unwrap();
-    ObjectMeta::delete(&trx, &dirs, b"del_key");
+    ObjectMeta::delete(&trx, &dirs, b"del_key").unwrap();
     trx.commit().await.unwrap();
 
     let trx = db.inner().create_trx().unwrap();
@@ -155,96 +155,112 @@ async fn chunk_operations() {
 
     // 1-byte value
     let trx = db.inner().create_trx().unwrap();
-    let nc = chunking::write_chunks(&trx, &dirs, b"c_1byte", b"\x42");
+    let nc = chunking::write_chunks(&trx, &dirs.obj, b"c_1byte", b"\x42");
     assert_eq!(nc, 1);
     trx.commit().await.unwrap();
 
     let trx = db.inner().create_trx().unwrap();
-    let result = chunking::read_chunks(&trx, &dirs, b"c_1byte", 1, false).await.unwrap();
+    let result = chunking::read_chunks(&trx, &dirs.obj, b"c_1byte", 1, 0, false)
+        .await
+        .unwrap();
     assert_eq!(result, b"\x42", "1-byte value mismatch");
 
     // small value (< 1 chunk)
     let trx = db.inner().create_trx().unwrap();
-    let nc = chunking::write_chunks(&trx, &dirs, b"c_small", b"hello world");
+    let nc = chunking::write_chunks(&trx, &dirs.obj, b"c_small", b"hello world");
     assert_eq!(nc, 1);
     trx.commit().await.unwrap();
 
     let trx = db.inner().create_trx().unwrap();
-    let result = chunking::read_chunks(&trx, &dirs, b"c_small", 1, false).await.unwrap();
+    let result = chunking::read_chunks(&trx, &dirs.obj, b"c_small", 1, 0, false)
+        .await
+        .unwrap();
     assert_eq!(result, b"hello world", "small value mismatch");
 
     // empty value
     let trx = db.inner().create_trx().unwrap();
-    let nc = chunking::write_chunks(&trx, &dirs, b"c_empty", b"");
+    let nc = chunking::write_chunks(&trx, &dirs.obj, b"c_empty", b"");
     assert_eq!(nc, 0);
     trx.commit().await.unwrap();
 
     let trx = db.inner().create_trx().unwrap();
-    let result = chunking::read_chunks(&trx, &dirs, b"c_empty", 0, false).await.unwrap();
+    let result = chunking::read_chunks(&trx, &dirs.obj, b"c_empty", 0, 0, false)
+        .await
+        .unwrap();
     assert!(result.is_empty(), "empty value should be empty");
 
     // large value (500KB = 5 chunks)
     let big = vec![0xABu8; 500_000];
     let trx = db.inner().create_trx().unwrap();
-    let nc = chunking::write_chunks(&trx, &dirs, b"c_big", &big);
+    let nc = chunking::write_chunks(&trx, &dirs.obj, b"c_big", &big);
     assert_eq!(nc, 5);
     trx.commit().await.unwrap();
 
     let trx = db.inner().create_trx().unwrap();
-    let result = chunking::read_chunks(&trx, &dirs, b"c_big", 5, false).await.unwrap();
+    let result = chunking::read_chunks(&trx, &dirs.obj, b"c_big", 5, 0, false)
+        .await
+        .unwrap();
     assert_eq!(result, big, "500KB value mismatch");
 
     // exact chunk boundary (100,000 bytes)
     let exact = vec![0x42u8; CHUNK_SIZE];
     let trx = db.inner().create_trx().unwrap();
-    let nc = chunking::write_chunks(&trx, &dirs, b"c_exact", &exact);
+    let nc = chunking::write_chunks(&trx, &dirs.obj, b"c_exact", &exact);
     assert_eq!(nc, 1);
     trx.commit().await.unwrap();
 
     let trx = db.inner().create_trx().unwrap();
-    let result = chunking::read_chunks(&trx, &dirs, b"c_exact", 1, false).await.unwrap();
+    let result = chunking::read_chunks(&trx, &dirs.obj, b"c_exact", 1, 0, false)
+        .await
+        .unwrap();
     assert_eq!(result, exact, "exact boundary mismatch");
 
     // boundary + 1 (100,001 bytes = 2 chunks)
     let bplus = vec![0x77u8; CHUNK_SIZE + 1];
     let trx = db.inner().create_trx().unwrap();
-    let nc = chunking::write_chunks(&trx, &dirs, b"c_bplus", &bplus);
+    let nc = chunking::write_chunks(&trx, &dirs.obj, b"c_bplus", &bplus);
     assert_eq!(nc, 2);
     trx.commit().await.unwrap();
 
     let trx = db.inner().create_trx().unwrap();
-    let result = chunking::read_chunks(&trx, &dirs, b"c_bplus", 2, false).await.unwrap();
+    let result = chunking::read_chunks(&trx, &dirs.obj, b"c_bplus", 2, 0, false)
+        .await
+        .unwrap();
     assert_eq!(result, bplus, "boundary+1 mismatch");
 
     // delete removes all chunks
     let del_data = vec![0xFFu8; CHUNK_SIZE * 3];
     let trx = db.inner().create_trx().unwrap();
-    chunking::write_chunks(&trx, &dirs, b"c_del", &del_data);
+    chunking::write_chunks(&trx, &dirs.obj, b"c_del", &del_data);
     trx.commit().await.unwrap();
 
     let trx = db.inner().create_trx().unwrap();
-    chunking::delete_chunks(&trx, &dirs, b"c_del");
+    chunking::delete_chunks(&trx, &dirs.obj, b"c_del");
     trx.commit().await.unwrap();
 
     let trx = db.inner().create_trx().unwrap();
     assert!(
-        chunking::read_chunks(&trx, &dirs, b"c_del", 3, false).await.is_err(),
+        chunking::read_chunks(&trx, &dirs.obj, b"c_del", 3, 0, false)
+            .await
+            .is_err(),
         "reading deleted chunks should fail"
     );
 
     // overwrite with different size (3 chunks → 1 chunk)
     let trx = db.inner().create_trx().unwrap();
-    chunking::write_chunks(&trx, &dirs, b"c_over", &vec![0xAAu8; CHUNK_SIZE * 3]);
+    chunking::write_chunks(&trx, &dirs.obj, b"c_over", &vec![0xAAu8; CHUNK_SIZE * 3]);
     trx.commit().await.unwrap();
 
     let small = vec![0xBBu8; 50];
     let trx = db.inner().create_trx().unwrap();
-    chunking::delete_chunks(&trx, &dirs, b"c_over");
-    chunking::write_chunks(&trx, &dirs, b"c_over", &small);
+    chunking::delete_chunks(&trx, &dirs.obj, b"c_over");
+    chunking::write_chunks(&trx, &dirs.obj, b"c_over", &small);
     trx.commit().await.unwrap();
 
     let trx = db.inner().create_trx().unwrap();
-    let result = chunking::read_chunks(&trx, &dirs, b"c_over", 1, false).await.unwrap();
+    let result = chunking::read_chunks(&trx, &dirs.obj, b"c_over", 1, 0, false)
+        .await
+        .unwrap();
     assert_eq!(result, small, "overwrite mismatch");
 
     cleanup(&db, &root).await;
@@ -329,7 +345,7 @@ async fn run_transact_write_then_read() {
             let meta = ObjectMeta::new_string(1, data.len() as u64);
             meta.write(&tr, &d, key)
                 .map_err(|e| foundationdb::FdbBindingError::CustomError(Box::new(e)))?;
-            chunking::write_chunks(&tr, &d, key, data);
+            chunking::write_chunks(&tr, &d.obj, key, data);
             Ok(())
         }
     })
@@ -344,7 +360,7 @@ async fn run_transact_write_then_read() {
                 .await
                 .map_err(|e| foundationdb::FdbBindingError::CustomError(Box::new(e)))?;
             let meta = meta.expect("key should exist");
-            chunking::read_chunks(&tr, &d, key, meta.num_chunks, false)
+            chunking::read_chunks(&tr, &d.obj, key, meta.num_chunks, meta.size_bytes, false)
                 .await
                 .map_err(|e| foundationdb::FdbBindingError::CustomError(Box::new(e)))
         }

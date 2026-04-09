@@ -10,6 +10,6 @@ pub mod meta;
 pub mod transaction;
 
 pub use database::Database;
-pub use directories::Directories;
+pub use directories::{Directories, MAX_KEY_SIZE, validate_key_size};
 pub use meta::{KeyType, ObjectMeta};
 pub use transaction::{IsolationMode, run_transact};

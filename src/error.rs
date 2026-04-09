@@ -39,6 +39,9 @@ pub enum StorageError {
 
     #[error("directory error: {0}")]
     Directory(String),
+
+    #[error("key too large ({size} bytes, max {max})")]
+    KeyTooLarge { size: usize, max: usize },
 }
 
 /// Errors during RESP protocol parsing or encoding.

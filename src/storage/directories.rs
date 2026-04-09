@@ -22,6 +22,31 @@ use crate::error::StorageError;
 /// The eight subspace names under each namespace.
 const SUBSPACE_NAMES: [&str; 8] = ["meta", "obj", "hash", "set", "zset", "zset_idx", "list", "expire"];
 
+/// Maximum allowed Redis key size in bytes.
+///
+/// FDB has a hard 10,000-byte key limit. Our FDB keys include:
+/// - Directory subspace prefix (~2-4 bytes from the directory layer)
+/// - Tuple layer encoding overhead (~3 bytes: type byte + null terminator + tuple end)
+/// - The Redis key itself
+///
+/// We set a conservative limit of 8 KiB to leave ample room for the
+/// subspace prefix, tuple encoding, and composite keys (e.g., hash
+/// field keys include both the Redis key and the field name).
+pub const MAX_KEY_SIZE: usize = 8 * 1024;
+
+/// Validate that a Redis key doesn't exceed the size limit.
+///
+/// Returns `Err(StorageError::KeyTooLarge)` if the key is too large.
+pub fn validate_key_size(key: &[u8]) -> Result<(), StorageError> {
+    if key.len() > MAX_KEY_SIZE {
+        return Err(StorageError::KeyTooLarge {
+            size: key.len(),
+            max: MAX_KEY_SIZE,
+        });
+    }
+    Ok(())
+}
+
 /// Holds FDB subspace handles for a single namespace.
 ///
 /// All eight subspaces are opened in a single transaction when the

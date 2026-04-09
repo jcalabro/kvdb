@@ -15,7 +15,7 @@ use foundationdb::Transaction;
 use serde::{Deserialize, Serialize};
 use tracing::trace_span;
 
-use super::directories::Directories;
+use super::directories::{self, Directories};
 use crate::error::StorageError;
 
 /// Maximum serialized size of an ObjectMeta in bytes.
@@ -132,6 +132,7 @@ impl ObjectMeta {
         snapshot: bool,
     ) -> Result<Option<Self>, StorageError> {
         let _span = trace_span!("meta_read").entered();
+        directories::validate_key_size(key)?;
 
         let fdb_key = dirs.meta_key(key);
         let maybe_val = tr.get(&fdb_key, snapshot).await.map_err(StorageError::Fdb)?;
@@ -155,6 +156,7 @@ impl ObjectMeta {
     /// in the transaction; the actual write happens at commit time.
     pub fn write(&self, tr: &Transaction, dirs: &Directories, key: &[u8]) -> Result<(), StorageError> {
         let _span = trace_span!("meta_write").entered();
+        directories::validate_key_size(key)?;
 
         let fdb_key = dirs.meta_key(key);
         let value = self.serialize()?;
@@ -163,11 +165,15 @@ impl ObjectMeta {
     }
 
     /// Delete the ObjectMeta for `key` from the transaction.
-    pub fn delete(tr: &Transaction, dirs: &Directories, key: &[u8]) {
+    ///
+    /// Returns an error if the key exceeds the size limit.
+    pub fn delete(tr: &Transaction, dirs: &Directories, key: &[u8]) -> Result<(), StorageError> {
         let _span = trace_span!("meta_delete").entered();
+        directories::validate_key_size(key)?;
 
         let fdb_key = dirs.meta_key(key);
         tr.clear(&fdb_key);
+        Ok(())
     }
 }
 

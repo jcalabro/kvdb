@@ -108,11 +108,13 @@ mod accept {
             // prop_assert! can drive proptest shrinking on failure.
             let (num_chunks, read_back) = rt.block_on(async {
                 let trx = db.inner().create_trx().unwrap();
-                let nc = chunking::write_chunks(&trx, dirs, &key, &data);
+                let nc = chunking::write_chunks(&trx, &dirs.obj, &key, &data);
                 trx.commit().await.unwrap();
 
                 let trx = db.inner().create_trx().unwrap();
-                let rb = chunking::read_chunks(&trx, dirs, &key, nc, false).await.unwrap();
+                let rb = chunking::read_chunks(&trx, &dirs.obj, &key, nc, data.len() as u64, false)
+                    .await
+                    .unwrap();
                 (nc, rb)
             });
 
