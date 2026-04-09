@@ -80,8 +80,16 @@ pub struct Directories {
 }
 
 impl Directories {
+    /// Maximum number of retries for directory creation.
+    ///
+    /// FDB directory operations use regular transactions that can conflict
+    /// when many processes (e.g. parallel tests) create directories
+    /// simultaneously. Retrying with backoff resolves this reliably.
+    const DIR_OPEN_MAX_RETRIES: u32 = 5;
+
     /// Open (or create) all 8 directory subspaces for `namespace`
-    /// inside a single FDB transaction.
+    /// inside a single FDB transaction, with automatic retry on
+    /// transient FDB conflicts.
     ///
     /// `root_prefix` is the top-level directory name — `"kvdb"` in
     /// production, `"kvdb_test_<uuid>"` in tests for isolation.
@@ -89,52 +97,70 @@ impl Directories {
         let span = info_span!("dir_open", ns = namespace, root = root_prefix);
 
         async {
-            let ns_str = namespace.to_string();
+            let mut last_err = None;
 
-            let trx = db.inner().create_trx().map_err(StorageError::Fdb)?;
-
-            let dir_layer = DirectoryLayer::default();
-
-            let mut subspaces: Vec<DirectorySubspace> = Vec::with_capacity(8);
-
-            for name in &SUBSPACE_NAMES {
-                let path = vec![root_prefix.to_string(), ns_str.clone(), (*name).to_string()];
-
-                let output = dir_layer
-                    .create_or_open(&trx, &path, None, None)
-                    .await
-                    .map_err(|e| StorageError::Directory(format!("{e:?}")))?;
-
-                match output {
-                    foundationdb::directory::DirectoryOutput::DirectorySubspace(ds) => {
-                        subspaces.push(ds);
-                    }
-                    _ => {
-                        return Err(StorageError::Directory(
-                            "expected DirectorySubspace, got DirectoryPartition".to_string(),
-                        ));
+            for attempt in 0..Self::DIR_OPEN_MAX_RETRIES {
+                match Self::try_open(db, namespace, root_prefix).await {
+                    Ok(dirs) => return Ok(dirs),
+                    Err(e) => {
+                        tracing::warn!(attempt, error = %e, "directory open conflict, retrying");
+                        last_err = Some(e);
+                        tokio::time::sleep(tokio::time::Duration::from_millis(50 * (attempt as u64 + 1))).await;
                     }
                 }
             }
 
-            trx.commit().await.map_err(|e| StorageError::Fdb(e.into()))?;
-
-            // SUBSPACE_NAMES order: meta, obj, hash, set, zset, zset_idx, list, expire
-            Ok(Self {
-                namespace,
-                root_prefix: root_prefix.to_string(),
-                meta: subspaces.remove(0),
-                obj: subspaces.remove(0),
-                hash: subspaces.remove(0),
-                set: subspaces.remove(0),
-                zset: subspaces.remove(0),
-                zset_idx: subspaces.remove(0),
-                list: subspaces.remove(0),
-                expire: subspaces.remove(0),
-            })
+            Err(last_err.unwrap())
         }
         .instrument(span)
         .await
+    }
+
+    /// Single attempt to open all 8 directory subspaces.
+    async fn try_open(db: &super::database::Database, namespace: u8, root_prefix: &str) -> Result<Self, StorageError> {
+        let ns_str = namespace.to_string();
+
+        let trx = db.inner().create_trx().map_err(StorageError::Fdb)?;
+
+        let dir_layer = DirectoryLayer::default();
+
+        let mut subspaces: Vec<DirectorySubspace> = Vec::with_capacity(8);
+
+        for name in &SUBSPACE_NAMES {
+            let path = vec![root_prefix.to_string(), ns_str.clone(), (*name).to_string()];
+
+            let output = dir_layer
+                .create_or_open(&trx, &path, None, None)
+                .await
+                .map_err(|e| StorageError::Directory(format!("{e:?}")))?;
+
+            match output {
+                foundationdb::directory::DirectoryOutput::DirectorySubspace(ds) => {
+                    subspaces.push(ds);
+                }
+                _ => {
+                    return Err(StorageError::Directory(
+                        "expected DirectorySubspace, got DirectoryPartition".to_string(),
+                    ));
+                }
+            }
+        }
+
+        trx.commit().await.map_err(|e| StorageError::Fdb(e.into()))?;
+
+        // SUBSPACE_NAMES order: meta, obj, hash, set, zset, zset_idx, list, expire
+        Ok(Self {
+            namespace,
+            root_prefix: root_prefix.to_string(),
+            meta: subspaces.remove(0),
+            obj: subspaces.remove(0),
+            hash: subspaces.remove(0),
+            set: subspaces.remove(0),
+            zset: subspaces.remove(0),
+            zset_idx: subspaces.remove(0),
+            list: subspaces.remove(0),
+            expire: subspaces.remove(0),
+        })
     }
 
     /// Build the FDB key for a meta entry: `<meta_prefix> + pack(key)`.

@@ -8,19 +8,13 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use crate::config::ServerConfig;
 use crate::observability::metrics;
 use crate::server::connection;
 use crate::storage::{Database, Directories, NamespaceCache};
 use crate::ttl;
-
-/// Maximum number of retries for opening FDB directories.
-///
-/// Directory creation uses a regular FDB transaction that can conflict
-/// when many processes (e.g. parallel tests) initialize simultaneously.
-const DIR_OPEN_MAX_RETRIES: u32 = 5;
 
 /// Run the main server loop: accept connections and dispatch handlers.
 ///
@@ -35,23 +29,9 @@ pub async fn run(config: ServerConfig, shutdown: tokio::sync::broadcast::Receive
 
     let root_prefix = config.root_prefix.as_deref().unwrap_or("kvdb");
 
-    // Retry directory open — the underlying FDB transaction can conflict
-    // when multiple servers (or tests) start concurrently.
-    let mut dirs = None;
-    for attempt in 0..DIR_OPEN_MAX_RETRIES {
-        match Directories::open(&db, 0, root_prefix).await {
-            Ok(d) => {
-                dirs = Some(d);
-                break;
-            }
-            Err(e) if attempt + 1 < DIR_OPEN_MAX_RETRIES => {
-                warn!(attempt, error = %e, "directory open failed, retrying");
-                tokio::time::sleep(tokio::time::Duration::from_millis(50 * (attempt as u64 + 1))).await;
-            }
-            Err(e) => return Err(e.into()),
-        }
-    }
-    let dirs = dirs.expect("directory open succeeded within retry limit");
+    // Directories::open() has built-in retry logic for FDB transaction
+    // conflicts that occur when many processes open directories concurrently.
+    let dirs = Directories::open(&db, 0, root_prefix).await?;
 
     let ns_cache = NamespaceCache::new(db.clone(), root_prefix.to_string(), dirs.clone());
 
