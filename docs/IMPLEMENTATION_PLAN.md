@@ -5,7 +5,7 @@
 | Milestone | Status | Notes |
 |-----------|--------|-------|
 | M0: Project Skeleton | **Complete** | All exit criteria met. `just` inner loop at ~1.1s. 8 unit tests passing. |
-| M1: RESP3 Parser/Encoder | Not started | |
+| M1: RESP3 Parser/Encoder | **Complete** | 99 unit tests, 15K+ proptest cases, 4 fuzz targets (2.2M+ runs, 0 crashes), criterion benchmarks. Parser: ~37ns simple, ~126ns SET cmd. Encoder: ~12ns simple, ~17ns bulk. 2 bugs found and fixed by fuzzer. |
 | M2: TCP Server Shell | Not started | |
 | M3: FDB Storage Layer | Not started | |
 | M4: String Commands | Not started | |
@@ -34,6 +34,30 @@
 - `src/error.rs` — `Error`, `ProtocolError`, `CommandError` with thiserror
 
 **Test infrastructure**: `tests/harness/mod.rs` (TestContext with random-port server startup, redis-rs client), integration/ and accept/ directories, fuzz target for RESP parser, criterion bench scaffold.
+
+### What's been built (M1)
+
+**Parser** (`src/protocol/parser.rs`) — Two-phase incremental RESP parser covering all 16 type prefixes (`+`, `-`, `:`, `$`, `*`, `_`, `#`, `,`, `(`, `!`, `=`, `%`, `~`, `>`, `|`). Phase 1 scans for frame completeness without modifying the buffer; phase 2 decodes with zero-copy `Bytes::slice()` for bulk payloads. Safety limits: max nesting depth 128, max line 64KB, max bulk 512MB. Hand-rolled integer parser handles `i64::MIN` without overflow.
+
+**Encoder** (`src/protocol/encoder.rs`) — Full RESP3 native encoding plus RESP2 downgrade (Map→flat Array, Set→Array, Boolean→Integer 0/1, Null→`$-1\r\n`, Double→BulkString, BulkError→simple Error with binary-safe fallback for payloads containing `\r`/`\n`). Uses `itoa`/`ryu` for fast integer/float formatting.
+
+**Types** (`src/protocol/types.rs`) — `RedisCommand::from_resp()` parses Array-of-BulkStrings into command + args with case-insensitive uppercasing. Added `RespValue::ok()` and `RespValue::err()` convenience constructors.
+
+**Error** (`src/error.rs`) — Added `ProtocolError::NestingTooDeep` variant.
+
+**Testing** (99 unit tests + 15K proptest cases + 4 fuzz targets):
+- Unit tests cover every RESP type in both parser and encoder, edge cases (empty, null, nested, binary data with embedded `\r\n`), RESP2 downgrade, incremental parsing, error conditions.
+- Property tests (`tests/accept_protocol.rs`): RESP3 round-trip, RESP2 encode-then-parse, incremental parsing at arbitrary split points. 5K cases per property, 15K total.
+- Fuzz targets: `resp_parser` (raw bytes), `resp_multi_frame` (parse loop), `resp_roundtrip` (structured encode→parse), `resp_encoder` (encoder output validity). 2 bugs found and fixed: boolean/null decoder sync and `i64::MIN` overflow.
+
+**Benchmarks** (`benches/commands.rs`) — Criterion benchmarks for parser and encoder across value sizes and types:
+- Parse simple string: ~37ns (~27M ops/sec)
+- Parse `SET key value` command: ~126ns (~8M ops/sec)
+- Parse 100-PING pipeline: ~5.7µs (~18M cmds/sec)
+- Encode simple string: ~12ns (~83M ops/sec)
+- Full roundtrip (SET + OK): ~152ns (~6.5M ops/sec)
+
+**`just` inner loop**: 99 tests in ~0.5s. **`just accept`**: 15K+ proptest cases in ~1.1s. **`just fuzz`**: runs all 4 targets (default 30s each).
 
 ---
 

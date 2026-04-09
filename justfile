@@ -6,12 +6,12 @@ default: lint test
 # Unit + integration tests against real FDB. Focused cases, not exhaustive.
 # Requires `just up` first.
 test:
-    cargo nextest run -E 'not test(accept::)'
+    cargo nextest run -E 'not binary(accept_protocol) and not test(accept)'
 
 # Exhaustive acceptance tests. Randomized inputs, property-based fuzzing,
 # large corpus, chaos sequences against live server + FDB.
 accept:
-    cargo nextest run --no-tests=pass -E 'test(accept::)'
+    cargo nextest run --no-tests=pass -E 'binary(accept_protocol) or test(accept)'
 
 # Full CI pipeline — lint, all tests, doc build. Run before pushing.
 ci: lint test accept
@@ -41,9 +41,12 @@ up:
 down:
     docker compose down --remove-orphans
 
-# Run the fuzzer (default 30s per target, or pass duration)
+# Run all fuzz targets (default 30s each, or pass duration)
 fuzz duration="30":
     cargo +nightly fuzz run resp_parser -- -max_total_time={{duration}}
+    cargo +nightly fuzz run resp_multi_frame -- -max_total_time={{duration}}
+    cargo +nightly fuzz run resp_roundtrip -- -max_total_time={{duration}}
+    cargo +nightly fuzz run resp_encoder -- -max_total_time={{duration}}
 
 # Run benchmarks
 bench:

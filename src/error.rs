@@ -36,6 +36,9 @@ pub enum ProtocolError {
 
     #[error("line too long ({len} bytes, max {max})")]
     LineTooLong { len: usize, max: usize },
+
+    #[error("nesting depth exceeded (max {max})")]
+    NestingTooDeep { max: usize },
 }
 
 /// Errors during command execution.

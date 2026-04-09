@@ -9,6 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
 kvdb = { path = ".." }
 bytes = "1"
 
@@ -19,4 +20,19 @@ members = ["."]
 [[bin]]
 name = "resp_parser"
 path = "fuzz_targets/resp_parser.rs"
+doc = false
+
+[[bin]]
+name = "resp_multi_frame"
+path = "fuzz_targets/resp_multi_frame.rs"
+doc = false
+
+[[bin]]
+name = "resp_roundtrip"
+path = "fuzz_targets/resp_roundtrip.rs"
+doc = false
+
+[[bin]]
+name = "resp_encoder"
+path = "fuzz_targets/resp_encoder.rs"
 doc = false

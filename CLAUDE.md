@@ -72,6 +72,7 @@ Client ←RESP→ Server → Commands → Storage → FoundationDB
 - **`just accept`** — property-based tests (proptest), randomized command sequences verified against an in-memory model, chunking boundary tests, WRONGTYPE cross-type matrix. Exhaustive.
 - **`tests/harness/mod.rs`** — `TestContext` spins up a real server on a random port with isolated FDB namespace. Tests use the `redis` crate as client (not mocks).
 - Nextest runs each test in its own process for isolation. 10-second per-test timeout.
+- **`just fuzz`** — runs 4 libfuzzer targets against the RESP parser/encoder (raw bytes, multi-frame, structured round-trip, encoder validity). Requires nightly.
 
 ## FDB Key Layout
 

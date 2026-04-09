@@ -21,6 +21,10 @@ target
 #.idea/
 
 
+# Fuzz crash artifacts
+fuzz/artifacts/
+fuzz/corpus/
+
 # Added by cargo
 
 /target
