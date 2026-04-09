@@ -61,33 +61,9 @@ fdbcli:
 build:
     cargo build --release
 
-# Run smoke tests against a live server (starts one automatically)
-smoke:
-    #!/usr/bin/env bash
-    set -e
-    cargo build --example smoke 2>&1
-
-    cargo run -- --bind-addr 127.0.0.1:6399 --log-level warn &
-    SERVER_PID=$!
-
-    # Wait for server to accept connections
-    for i in $(seq 1 50); do
-        if redis-cli -p 6399 PING >/dev/null 2>&1; then break; fi
-        sleep 0.1
-    done
-
-    set +e
-    cargo run --example smoke -- 127.0.0.1:6399
-    STATUS=$?
-    set -e
-
-    kill $SERVER_PID 2>/dev/null
-    wait $SERVER_PID 2>/dev/null || true
-    exit $STATUS
-
-# Run load generator against a live server (default 10s, 32 connections)
-loadgen seconds="10" connections="32" addr="127.0.0.1:6379":
-    cargo run --release --example loadgen -- --seconds {{seconds}} --connections {{connections}} --addr {{addr}}
+# Run smoke tests (validate + load) against a live server (starts one automatically)
+smoke seconds="10" connections="32":
+    cargo run --example smoke -- --spawn-server --seconds {{seconds}} --connections {{connections}}
 
 # Run the server locally (debug mode)
 run *ARGS:
