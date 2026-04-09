@@ -851,6 +851,7 @@ dependencies = [
  "criterion",
  "itoa",
  "lazy_static",
+ "memchr",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",

@@ -16,6 +16,10 @@ use crate::protocol::types::RespValue;
 ///
 /// `protocol_version` controls whether RESP3 types are encoded natively (3)
 /// or downgraded to RESP2 equivalents (2).
+///
+/// Note: RESP3 encoding is lossy for null variants — `BulkString(None)`,
+/// `Array(None)`, and `Null` all encode to `_\r\n`, which parses back as
+/// `Null`. Use [`types::resp3_eq`] for round-trip equality checks.
 pub fn encode(value: &RespValue, protocol_version: u8) -> BytesMut {
     let mut buf = BytesMut::with_capacity(estimate_size(value));
     encode_into(&mut buf, value, protocol_version);
@@ -291,8 +295,11 @@ fn encode_resp2(buf: &mut BytesMut, value: &RespValue) {
         }
         RespValue::Attribute(_) => {
             // Attributes are metadata — RESP2 has no equivalent.
-            // Silently omit. The actual reply follows the attribute
-            // and will be encoded separately by the caller.
+            // At the top level, the actual reply follows the attribute and
+            // is encoded separately by the caller. When nested inside a
+            // container, we must emit a placeholder to keep element counts
+            // consistent, so we encode as null bulk string.
+            buf.extend_from_slice(b"$-1\r\n");
         }
     }
 }
@@ -320,31 +327,22 @@ fn encode_double_value(buf: &mut BytesMut, d: f64) {
 
 /// Encode a double as a RESP2 bulk string.
 fn encode_resp2_bulk_from_double(buf: &mut BytesMut, d: f64) {
-    // Format the double into a temporary buffer, then wrap as bulk string
-    let s = if d.is_infinite() {
+    // Format to a stack buffer, then wrap as a RESP2 bulk string.
+    // ryu::Buffer is stack-allocated so the common (finite) path is alloc-free.
+    let mut ryu_buf = ryu::Buffer::new();
+    let formatted: &str = if d.is_infinite() {
         if d.is_sign_positive() { "inf" } else { "-inf" }
     } else if d.is_nan() {
         "nan"
     } else {
-        // Use a static buffer to avoid allocation
-        // ryu::Buffer is stack-allocated
-        // We need to handle this slightly differently since ryu returns &str
-        let mut ryu_buf = ryu::Buffer::new();
-        let formatted = ryu_buf.format(d);
-        buf.extend_from_slice(b"$");
-        let mut itoa_buf = itoa::Buffer::new();
-        buf.extend_from_slice(itoa_buf.format(formatted.len()).as_bytes());
-        buf.extend_from_slice(b"\r\n");
-        buf.extend_from_slice(formatted.as_bytes());
-        buf.extend_from_slice(b"\r\n");
-        return;
+        ryu_buf.format(d)
     };
 
     buf.extend_from_slice(b"$");
     let mut itoa_buf = itoa::Buffer::new();
-    buf.extend_from_slice(itoa_buf.format(s.len()).as_bytes());
+    buf.extend_from_slice(itoa_buf.format(formatted.len()).as_bytes());
     buf.extend_from_slice(b"\r\n");
-    buf.extend_from_slice(s.as_bytes());
+    buf.extend_from_slice(formatted.as_bytes());
     buf.extend_from_slice(b"\r\n");
 }
 
@@ -622,11 +620,11 @@ mod tests {
 
     #[test]
     fn encode_attribute_resp2() {
-        // Attributes are silently omitted in RESP2
+        // Attributes encode as null bulk string in RESP2
         let val = RespValue::Attribute(vec![(
             RespValue::SimpleString(Bytes::from_static(b"ttl")),
             RespValue::Integer(3600),
         )]);
-        assert_eq!(&encode(&val, 2)[..], b"");
+        assert_eq!(&encode(&val, 2)[..], b"$-1\r\n");
     }
 }

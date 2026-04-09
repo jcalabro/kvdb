@@ -36,6 +36,7 @@ pub enum FuzzRespValue {
     Map(FuzzPairVec),
     Set(FuzzVec),
     Push(FuzzVec),
+    Attribute(FuzzPairVec),
 }
 
 /// A string that never contains \r or \n (valid for simple strings/errors).
@@ -182,7 +183,7 @@ fn arb_bounded(
         return arb_leaf(u);
     }
     // Bias toward leaves to keep trees small
-    let choice: u8 = u.int_in_range(0..=14)?;
+    let choice: u8 = u.int_in_range(0..=15)?;
     if choice < 10 {
         arb_leaf(u)
     } else {
@@ -220,6 +221,16 @@ fn arb_bounded(
                     elems.push(arb_bounded(u, depth - 1)?);
                 }
                 Ok(FuzzRespValue::Push(FuzzVec(elems)))
+            }
+            14 => {
+                let len = u.int_in_range(0..=MAX_SIZE)?;
+                let mut pairs = Vec::with_capacity(len);
+                for _ in 0..len {
+                    let k = arb_bounded(u, depth - 1)?;
+                    let v = arb_bounded(u, depth - 1)?;
+                    pairs.push((k, v));
+                }
+                Ok(FuzzRespValue::Attribute(FuzzPairVec(pairs)))
             }
             _ => Ok(FuzzRespValue::Array(None)),
         }
@@ -263,6 +274,13 @@ impl FuzzRespValue {
             FuzzRespValue::Push(elems) => {
                 RespValue::Push(elems.0.into_iter().map(|v| v.into_resp()).collect())
             }
+            FuzzRespValue::Attribute(pairs) => RespValue::Attribute(
+                pairs
+                    .0
+                    .into_iter()
+                    .map(|(k, v)| (k.into_resp(), v.into_resp()))
+                    .collect(),
+            ),
         }
     }
 }

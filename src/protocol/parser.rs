@@ -30,6 +30,12 @@ const MAX_LINE_LENGTH: usize = 64 * 1024;
 /// Matches Redis default of 512 MB.
 const MAX_BULK_LENGTH: i64 = 512 * 1024 * 1024;
 
+/// Maximum element count for aggregate types (arrays, maps, sets, etc.).
+/// Prevents OOM from malicious inputs like `*2147483647\r\n` that would
+/// cause a huge `Vec::with_capacity()` allocation. 1M elements is far
+/// beyond any legitimate Redis command.
+const MAX_AGGREGATE_COUNT: usize = 1_048_576;
+
 /// Parse one complete RESP value from the front of `buf`.
 ///
 /// On success, the consumed bytes are drained from `buf` and the parsed
@@ -257,6 +263,7 @@ fn try_parse_bulk_string(buf: &[u8], pos: &mut usize) -> Result<Option<Blueprint
 
     let data_start = *pos;
     let data_end = data_start + data_len;
+    validate_trailing_crlf(buf, data_end)?;
     *pos = data_end + 2; // skip data + \r\n
     Ok(Some(Blueprint::BulkString(Some((data_start, data_end)))))
 }
@@ -277,6 +284,7 @@ fn try_parse_array(buf: &[u8], pos: &mut usize, depth: usize) -> Result<Option<B
     }
 
     let count = count as usize;
+    validate_aggregate_count(count)?;
     if !plausible(buf, *pos, count) {
         return Ok(INCOMPLETE);
     }
@@ -323,7 +331,7 @@ fn try_parse_double(buf: &[u8], pos: &mut usize) -> Result<Option<Blueprint>, Pr
         Some(range) => range,
         None => return Ok(INCOMPLETE),
     };
-    let s = std::str::from_utf8(&buf[start..end]).map_err(|_| ProtocolError::InvalidFormat { byte: buf[start] })?;
+    let s = std::str::from_utf8(&buf[start..end]).map_err(|_| ProtocolError::InvalidFormat { byte: b',' })?;
 
     let val = match s {
         "inf" | "+inf" => f64::INFINITY,
@@ -331,7 +339,7 @@ fn try_parse_double(buf: &[u8], pos: &mut usize) -> Result<Option<Blueprint>, Pr
         "nan" => f64::NAN,
         _ => s
             .parse::<f64>()
-            .map_err(|_| ProtocolError::InvalidFormat { byte: buf[start] })?,
+            .map_err(|_| ProtocolError::InvalidFormat { byte: b',' })?,
     };
     Ok(Some(Blueprint::Double(val)))
 }
@@ -366,6 +374,7 @@ fn try_parse_bulk_error(buf: &[u8], pos: &mut usize) -> Result<Option<Blueprint>
 
     let data_start = *pos;
     let data_end = data_start + data_len;
+    validate_trailing_crlf(buf, data_end)?;
     *pos = data_end + 2;
     Ok(Some(Blueprint::BulkError(data_start, data_end)))
 }
@@ -398,6 +407,7 @@ fn try_parse_verbatim_string(buf: &[u8], pos: &mut usize) -> Result<Option<Bluep
     let encoding = [buf[*pos], buf[*pos + 1], buf[*pos + 2]];
     let data_start = *pos + 4;
     let data_end = *pos + data_len;
+    validate_trailing_crlf(buf, data_end)?;
     *pos += data_len + 2;
     Ok(Some(Blueprint::VerbatimString {
         encoding,
@@ -418,6 +428,7 @@ fn try_parse_map(buf: &[u8], pos: &mut usize, depth: usize) -> Result<Option<Blu
     }
 
     let count = count as usize;
+    validate_aggregate_count(count)?;
     if !plausible(buf, *pos, count * 2) {
         return Ok(INCOMPLETE);
     }
@@ -448,6 +459,7 @@ fn try_parse_set(buf: &[u8], pos: &mut usize, depth: usize) -> Result<Option<Blu
     }
 
     let count = count as usize;
+    validate_aggregate_count(count)?;
     if !plausible(buf, *pos, count) {
         return Ok(INCOMPLETE);
     }
@@ -473,6 +485,7 @@ fn try_parse_push(buf: &[u8], pos: &mut usize, depth: usize) -> Result<Option<Bl
     }
 
     let count = count as usize;
+    validate_aggregate_count(count)?;
     if !plausible(buf, *pos, count) {
         return Ok(INCOMPLETE);
     }
@@ -498,6 +511,7 @@ fn try_parse_attribute(buf: &[u8], pos: &mut usize, depth: usize) -> Result<Opti
     }
 
     let count = count as usize;
+    validate_aggregate_count(count)?;
     if !plausible(buf, *pos, count * 2) {
         return Ok(INCOMPLETE);
     }
@@ -537,22 +551,40 @@ fn plausible(buf: &[u8], pos: usize, n_elements: usize) -> bool {
 
 /// Find the byte offset of the first `\r\n` in `buf`.
 /// Returns the index of `\r`, or `None` if not found.
+/// Uses `memchr` for SIMD-accelerated scanning.
 #[inline]
 fn find_crlf(buf: &[u8]) -> Option<usize> {
     let mut start = 0;
-    while start < buf.len() {
-        match buf[start..].iter().position(|&b| b == b'\n') {
-            Some(rel) => {
-                let abs = start + rel;
-                if abs > 0 && buf[abs - 1] == b'\r' {
-                    return Some(abs - 1);
-                }
-                start = abs + 1;
-            }
-            None => return None,
+    while let Some(rel) = memchr::memchr(b'\n', &buf[start..]) {
+        let abs = start + rel;
+        if abs > 0 && buf[abs - 1] == b'\r' {
+            return Some(abs - 1);
         }
+        start = abs + 1;
     }
     None
+}
+
+/// Validate that `buf[offset..offset+2]` is `\r\n`.
+/// Called after bulk string / bulk error / verbatim string data.
+#[inline]
+fn validate_trailing_crlf(buf: &[u8], offset: usize) -> Result<(), ProtocolError> {
+    if buf[offset] != b'\r' || buf[offset + 1] != b'\n' {
+        return Err(ProtocolError::InvalidFormat { byte: buf[offset] });
+    }
+    Ok(())
+}
+
+/// Validate that an aggregate element count is within bounds.
+#[inline]
+fn validate_aggregate_count(count: usize) -> Result<(), ProtocolError> {
+    if count > MAX_AGGREGATE_COUNT {
+        return Err(ProtocolError::CountTooLarge {
+            count,
+            max: MAX_AGGREGATE_COUNT,
+        });
+    }
+    Ok(())
 }
 
 /// Parse a signed integer from an ASCII byte slice.
@@ -1071,5 +1103,142 @@ mod tests {
         assert!(parse_int_from_slice(b"").is_err());
         assert!(parse_int_from_slice(b"abc").is_err());
         assert!(parse_int_from_slice(b"-").is_err());
+    }
+
+    // --- Limit enforcement ---
+
+    #[test]
+    fn nesting_depth_exceeded() {
+        // Build input that nests arrays to MAX_DEPTH + 1
+        let mut input = Vec::new();
+        for _ in 0..=MAX_DEPTH {
+            input.extend_from_slice(b"*1\r\n");
+        }
+        input.extend_from_slice(b":42\r\n");
+
+        let mut buf = BytesMut::from(&input[..]);
+        let err = parse(&mut buf).unwrap_err();
+        assert!(
+            matches!(err, ProtocolError::NestingTooDeep { .. }),
+            "expected NestingTooDeep, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn nesting_at_max_depth_succeeds() {
+        // Exactly MAX_DEPTH levels of nesting should work
+        let mut input = Vec::new();
+        for _ in 0..MAX_DEPTH {
+            input.extend_from_slice(b"*1\r\n");
+        }
+        input.extend_from_slice(b":42\r\n");
+
+        let mut buf = BytesMut::from(&input[..]);
+        assert!(parse(&mut buf).unwrap().is_some());
+    }
+
+    #[test]
+    fn bulk_string_length_too_large() {
+        // Request a bulk string larger than MAX_BULK_LENGTH
+        let input = format!("${}\r\n", MAX_BULK_LENGTH + 1);
+        let mut buf = BytesMut::from(input.as_bytes());
+        let err = parse(&mut buf).unwrap_err();
+        assert!(
+            matches!(err, ProtocolError::InvalidLength(_)),
+            "expected InvalidLength, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn line_too_long() {
+        // Simple string exceeding MAX_LINE_LENGTH
+        let mut input = Vec::with_capacity(MAX_LINE_LENGTH + 10);
+        input.push(b'+');
+        input.extend(std::iter::repeat_n(b'x', MAX_LINE_LENGTH + 1));
+        input.extend_from_slice(b"\r\n");
+
+        let mut buf = BytesMut::from(&input[..]);
+        let err = parse(&mut buf).unwrap_err();
+        assert!(
+            matches!(err, ProtocolError::LineTooLong { .. }),
+            "expected LineTooLong, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn aggregate_count_too_large() {
+        let input = format!("*{}\r\n", MAX_AGGREGATE_COUNT + 1);
+        let mut buf = BytesMut::from(input.as_bytes());
+        let err = parse(&mut buf).unwrap_err();
+        assert!(
+            matches!(err, ProtocolError::CountTooLarge { .. }),
+            "expected CountTooLarge, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn map_count_too_large() {
+        let input = format!("%{}\r\n", MAX_AGGREGATE_COUNT + 1);
+        let mut buf = BytesMut::from(input.as_bytes());
+        let err = parse(&mut buf).unwrap_err();
+        assert!(
+            matches!(err, ProtocolError::CountTooLarge { .. }),
+            "expected CountTooLarge, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn integer_overflow_in_count() {
+        // Huge number that overflows i64
+        let mut buf = BytesMut::from(&b"*99999999999999999999\r\n"[..]);
+        assert!(parse(&mut buf).is_err());
+    }
+
+    // --- Trailing CRLF validation ---
+
+    #[test]
+    fn bulk_string_bad_trailing_bytes() {
+        // $5\r\nhelloXX — the XX should be \r\n
+        let mut buf = BytesMut::from(&b"$5\r\nhelloXX"[..]);
+        let err = parse(&mut buf).unwrap_err();
+        assert!(
+            matches!(err, ProtocolError::InvalidFormat { .. }),
+            "expected InvalidFormat, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn bulk_error_bad_trailing_bytes() {
+        let mut buf = BytesMut::from(&b"!3\r\nERRab"[..]);
+        let err = parse(&mut buf).unwrap_err();
+        assert!(
+            matches!(err, ProtocolError::InvalidFormat { .. }),
+            "expected InvalidFormat, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn verbatim_string_bad_trailing_bytes() {
+        let mut buf = BytesMut::from(&b"=9\r\ntxt:helloab"[..]);
+        let err = parse(&mut buf).unwrap_err();
+        assert!(
+            matches!(err, ProtocolError::InvalidFormat { .. }),
+            "expected InvalidFormat, got {:?}",
+            err
+        );
+    }
+
+    // --- Double special values ---
+
+    #[test]
+    fn resp3_double_positive_inf() {
+        assert_eq!(parse_complete(b",+inf\r\n"), RespValue::Double(f64::INFINITY));
     }
 }

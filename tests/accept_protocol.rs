@@ -10,7 +10,7 @@ use proptest::prelude::*;
 
 use kvdb::protocol::encoder::encode;
 use kvdb::protocol::parser::parse;
-use kvdb::protocol::types::RespValue;
+use kvdb::protocol::types::{RespValue, resp3_eq};
 
 /// Maximum nesting depth for generated values.
 /// Depth 3 with branching factor 5 still produces trees up to 125 leaves —
@@ -41,6 +41,7 @@ fn arb_resp_value(depth: usize) -> BoxedStrategy<RespValue> {
             1 => arb_map(depth),
             1 => arb_set(depth),
             1 => arb_push(depth),
+            1 => arb_attribute(depth),
         ]
         .boxed()
     }
@@ -115,57 +116,70 @@ fn arb_push(depth: usize) -> impl Strategy<Value = RespValue> {
     prop::collection::vec(arb_resp_value(depth - 1), 0..MAX_GEN_SIZE).prop_map(RespValue::Push)
 }
 
+/// Generate an Attribute with nested values.
+fn arb_attribute(depth: usize) -> impl Strategy<Value = RespValue> {
+    prop::collection::vec((arb_resp_value(depth - 1), arb_resp_value(depth - 1)), 0..MAX_GEN_SIZE)
+        .prop_map(RespValue::Attribute)
+}
+
 // ---------------------------------------------------------------------------
-// Custom equality: handles RESP3 encoding upgrades
+// RESP2 downgrade model
 // ---------------------------------------------------------------------------
 
-/// Compare two `RespValue`s, accounting for the fact that encoding in RESP3
-/// mode upgrades `BulkString(None)` and `Array(None)` to `Null`.
-fn resp_eq(a: &RespValue, b: &RespValue) -> bool {
-    match (a, b) {
-        // Null equivalences (RESP3 encoder converts these)
-        (RespValue::BulkString(None), RespValue::Null)
-        | (RespValue::Null, RespValue::BulkString(None))
-        | (RespValue::Array(None), RespValue::Null)
-        | (RespValue::Null, RespValue::Array(None)) => true,
-
-        // Direct matches
-        (RespValue::SimpleString(a), RespValue::SimpleString(b)) => a == b,
-        (RespValue::Error(a), RespValue::Error(b)) => a == b,
-        (RespValue::Integer(a), RespValue::Integer(b)) => a == b,
-        (RespValue::BulkString(Some(a)), RespValue::BulkString(Some(b))) => a == b,
-        (RespValue::BulkString(None), RespValue::BulkString(None)) => true,
-        (RespValue::Null, RespValue::Null) => true,
-        (RespValue::Boolean(a), RespValue::Boolean(b)) => a == b,
-        (RespValue::Double(a), RespValue::Double(b)) => (a.is_nan() && b.is_nan()) || a == b,
-        (RespValue::BigNumber(a), RespValue::BigNumber(b)) => a == b,
-        (RespValue::BulkError(a), RespValue::BulkError(b)) => a == b,
-        (
-            RespValue::VerbatimString { encoding: ea, data: da },
-            RespValue::VerbatimString { encoding: eb, data: db },
-        ) => ea == eb && da == db,
-        (RespValue::Array(Some(a)), RespValue::Array(Some(b))) => {
-            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| resp_eq(x, y))
+/// Predict what a `RespValue` will look like after RESP2 encode → parse round-trip.
+/// This mirrors the encoder's downgrade logic so we can verify the round-trip.
+fn resp2_downgrade(value: &RespValue) -> RespValue {
+    match value {
+        // RESP2-native types pass through unchanged
+        RespValue::SimpleString(_) | RespValue::Error(_) | RespValue::Integer(_) => value.clone(),
+        RespValue::BulkString(None) => RespValue::BulkString(None),
+        RespValue::BulkString(Some(_)) => value.clone(),
+        RespValue::Array(None) => RespValue::Array(None),
+        RespValue::Array(Some(elems)) => RespValue::Array(Some(elems.iter().map(resp2_downgrade).collect())),
+        // RESP3 → RESP2 downgrades
+        RespValue::Null => RespValue::BulkString(None),
+        RespValue::Boolean(b) => RespValue::Integer(if *b { 1 } else { 0 }),
+        RespValue::Double(d) => {
+            // Double → BulkString of the formatted value
+            let s = if d.is_infinite() {
+                if d.is_sign_positive() {
+                    "inf".to_string()
+                } else {
+                    "-inf".to_string()
+                }
+            } else if d.is_nan() {
+                "nan".to_string()
+            } else {
+                let mut ryu_buf = ryu::Buffer::new();
+                ryu_buf.format(*d).to_string()
+            };
+            RespValue::BulkString(Some(Bytes::from(s)))
         }
-        (RespValue::Map(a), RespValue::Map(b)) => {
-            a.len() == b.len()
-                && a.iter()
-                    .zip(b.iter())
-                    .all(|((k1, v1), (k2, v2))| resp_eq(k1, k2) && resp_eq(v1, v2))
+        RespValue::BigNumber(n) => RespValue::BulkString(Some(n.clone())),
+        RespValue::BulkError(e) => {
+            if e.iter().any(|&b| b == b'\r' || b == b'\n') {
+                // Unsafe for simple error — downgraded to bulk string
+                RespValue::BulkString(Some(e.clone()))
+            } else {
+                RespValue::Error(e.clone())
+            }
         }
-        (RespValue::Set(a), RespValue::Set(b)) => {
-            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| resp_eq(x, y))
+        RespValue::VerbatimString { data, .. } => RespValue::BulkString(Some(data.clone())),
+        RespValue::Map(pairs) => {
+            let mut elems = Vec::with_capacity(pairs.len() * 2);
+            for (k, v) in pairs {
+                elems.push(resp2_downgrade(k));
+                elems.push(resp2_downgrade(v));
+            }
+            RespValue::Array(Some(elems))
         }
-        (RespValue::Push(a), RespValue::Push(b)) => {
-            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| resp_eq(x, y))
+        RespValue::Set(elems) | RespValue::Push(elems) => {
+            RespValue::Array(Some(elems.iter().map(resp2_downgrade).collect()))
         }
-        (RespValue::Attribute(a), RespValue::Attribute(b)) => {
-            a.len() == b.len()
-                && a.iter()
-                    .zip(b.iter())
-                    .all(|((k1, v1), (k2, v2))| resp_eq(k1, k2) && resp_eq(v1, v2))
+        RespValue::Attribute(_) => {
+            // Attributes downgrade to null bulk string in RESP2
+            RespValue::BulkString(None)
         }
-        _ => false,
     }
 }
 
@@ -187,7 +201,7 @@ proptest! {
         let parsed = parse(&mut buf).expect("parse should not error").expect("frame should be complete");
 
         prop_assert!(
-            resp_eq(&value, &parsed),
+            resp3_eq(&value, &parsed),
             "round-trip failed:\n  original: {:?}\n  encoded:  {:?}\n  parsed:   {:?}",
             value,
             String::from_utf8_lossy(&encoded),
@@ -198,19 +212,24 @@ proptest! {
         prop_assert_eq!(buf.len(), 0, "unconsumed bytes after parse");
     }
 
-    /// RESP2 round-trip: encode in RESP2, parse back.
-    /// RESP2 encoding changes some types (Boolean→Integer, Null→BulkString(None), etc.),
-    /// so we only verify the parse succeeds and produces a valid value.
+    /// RESP2 round-trip: encode in RESP2, parse back, verify semantic equivalence.
+    /// RESP2 encoding downgrades types (Boolean→Integer, Null→BulkString(None),
+    /// Map→flat Array, etc.), so we verify the parsed result matches the expected
+    /// downgraded form.
     #[test]
     fn accept_resp2_encode_parses(value in arb_resp_value(MAX_GEN_DEPTH)) {
         let encoded = encode(&value, 2);
-        // Attributes are silently omitted in RESP2, which may produce empty output
-        if !encoded.is_empty() {
-            let mut buf = BytesMut::from(&encoded[..]);
-            let parsed = parse(&mut buf).expect("parse should not error").expect("frame should be complete");
-            // Just verify we got a valid value back
-            let _ = parsed;
-        }
+        let mut buf = BytesMut::from(&encoded[..]);
+        let parsed = parse(&mut buf).expect("parse should not error").expect("frame should be complete");
+        let expected = resp2_downgrade(&value);
+        prop_assert!(
+            resp3_eq(&expected, &parsed),
+            "RESP2 round-trip failed:\n  original:   {:?}\n  expected:   {:?}\n  parsed:     {:?}",
+            value,
+            expected,
+            parsed
+        );
+        prop_assert_eq!(buf.len(), 0, "unconsumed bytes after RESP2 parse");
     }
 
     /// Incremental parsing: splitting the encoded bytes at an arbitrary position
@@ -232,10 +251,10 @@ proptest! {
             // Feed the rest
             buf.extend_from_slice(second);
             let result2 = parse(&mut buf).expect("parse should not error").expect("frame should be complete after full data");
-            prop_assert!(resp_eq(&value, &result2));
+            prop_assert!(resp3_eq(&value, &result2));
         } else {
             // Got the full value in the first chunk — that's fine too
-            prop_assert!(resp_eq(&value, &result1.unwrap()));
+            prop_assert!(resp3_eq(&value, &result1.unwrap()));
         }
     }
 

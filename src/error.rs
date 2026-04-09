@@ -39,6 +39,9 @@ pub enum ProtocolError {
 
     #[error("nesting depth exceeded (max {max})")]
     NestingTooDeep { max: usize },
+
+    #[error("aggregate element count too large ({count}, max {max})")]
+    CountTooLarge { count: usize, max: usize },
 }
 
 /// Errors during command execution.

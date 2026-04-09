@@ -9,12 +9,22 @@ use bytes::Bytes;
 use crate::error::CommandError;
 
 /// A value in the RESP protocol (covers both RESP2 and RESP3 types).
+///
+/// Note: `Eq` is intentionally not derived because `Double(f64)` contains
+/// `f64` which does not implement `Eq` (NaN != NaN). Use [`resp3_eq`] for
+/// equality comparison that accounts for RESP3 null normalization.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RespValue {
     // --- RESP2 types ---
     /// Simple string: `+OK\r\n`
+    ///
+    /// Per RESP spec, simple strings cannot contain CR or LF. The parser
+    /// enforces CRLF termination but does not reject other control characters
+    /// or non-UTF-8 bytes — downstream code should validate if needed.
     SimpleString(Bytes),
     /// Error: `-ERR message\r\n`
+    ///
+    /// Same content constraints as `SimpleString`.
     Error(Bytes),
     /// Integer: `:42\r\n`
     Integer(i64),
@@ -125,8 +135,14 @@ impl RedisCommand {
             };
 
             if i == 0 {
-                // Uppercase the command name for case-insensitive dispatch
-                name = Some(Bytes::from(data.to_ascii_uppercase()));
+                // Uppercase the command name for case-insensitive dispatch.
+                // Skip allocation if already uppercase (common case: redis-cli
+                // and most client libraries send uppercase commands).
+                if data.iter().all(|b| !b.is_ascii_lowercase()) {
+                    name = Some(data);
+                } else {
+                    name = Some(Bytes::from(data.to_ascii_uppercase()));
+                }
             } else {
                 args.push(data);
             }
@@ -136,6 +152,60 @@ impl RedisCommand {
             name: name.expect("non-empty array guarantees first element"),
             args,
         })
+    }
+}
+
+/// Compare two `RespValue`s for equivalence under RESP3 null normalization.
+///
+/// In RESP3, `BulkString(None)` and `Array(None)` both encode to `_\r\n`
+/// (the native null type), which parses back as `Null`. This function
+/// treats those three representations as equivalent. It also handles
+/// `Double(NaN) == Double(NaN)` which standard `PartialEq` does not.
+pub fn resp3_eq(a: &RespValue, b: &RespValue) -> bool {
+    match (a, b) {
+        // Null equivalences (RESP3 encoder normalizes these)
+        (RespValue::BulkString(None), RespValue::Null)
+        | (RespValue::Null, RespValue::BulkString(None))
+        | (RespValue::Array(None), RespValue::Null)
+        | (RespValue::Null, RespValue::Array(None))
+        | (RespValue::Null, RespValue::Null)
+        | (RespValue::BulkString(None), RespValue::BulkString(None))
+        | (RespValue::Array(None), RespValue::Array(None)) => true,
+
+        (RespValue::SimpleString(a), RespValue::SimpleString(b)) => a == b,
+        (RespValue::Error(a), RespValue::Error(b)) => a == b,
+        (RespValue::Integer(a), RespValue::Integer(b)) => a == b,
+        (RespValue::BulkString(Some(a)), RespValue::BulkString(Some(b))) => a == b,
+        (RespValue::Boolean(a), RespValue::Boolean(b)) => a == b,
+        (RespValue::Double(a), RespValue::Double(b)) => (a.is_nan() && b.is_nan()) || a == b,
+        (RespValue::BigNumber(a), RespValue::BigNumber(b)) => a == b,
+        (RespValue::BulkError(a), RespValue::BulkError(b)) => a == b,
+        (
+            RespValue::VerbatimString { encoding: ea, data: da },
+            RespValue::VerbatimString { encoding: eb, data: db },
+        ) => ea == eb && da == db,
+        (RespValue::Array(Some(a)), RespValue::Array(Some(b))) => {
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| resp3_eq(x, y))
+        }
+        (RespValue::Map(a), RespValue::Map(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|((k1, v1), (k2, v2))| resp3_eq(k1, k2) && resp3_eq(v1, v2))
+        }
+        (RespValue::Set(a), RespValue::Set(b)) => {
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| resp3_eq(x, y))
+        }
+        (RespValue::Push(a), RespValue::Push(b)) => {
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| resp3_eq(x, y))
+        }
+        (RespValue::Attribute(a), RespValue::Attribute(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|((k1, v1), (k2, v2))| resp3_eq(k1, k2) && resp3_eq(v1, v2))
+        }
+        _ => false,
     }
 }
 

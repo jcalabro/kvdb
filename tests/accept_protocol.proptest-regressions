@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 6b3efe73aba69899373600f612d752739da945d8d6f1738060784b27f3629d46 # shrinks to value = Array(Some([Set([Set([Push([BulkError(b"\r\n\0")]), SimpleString(b"")])])]))
+cc 8fa5d26d397115bf152686a23436895f6e132add0329d0314dd248b0bc1a75c1 # shrinks to value = Map([(SimpleString(b""), Attribute([]))])
