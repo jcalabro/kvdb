@@ -84,8 +84,10 @@ impl Directories {
     ///
     /// FDB directory operations use regular transactions that can conflict
     /// when many processes (e.g. parallel tests) create directories
-    /// simultaneously. Retrying with backoff resolves this reliably.
-    const DIR_OPEN_MAX_RETRIES: u32 = 5;
+    /// simultaneously. Retrying with jittered backoff resolves this
+    /// reliably. 10 retries with 30-80ms random backoff covers even
+    /// the worst-case contention from 250+ parallel nextest processes.
+    const DIR_OPEN_MAX_RETRIES: u32 = 10;
 
     /// Open (or create) all 8 directory subspaces for `namespace`
     /// inside a single FDB transaction, with automatic retry on
@@ -105,7 +107,17 @@ impl Directories {
                     Err(e) => {
                         tracing::warn!(attempt, error = %e, "directory open conflict, retrying");
                         last_err = Some(e);
-                        tokio::time::sleep(tokio::time::Duration::from_millis(50 * (attempt as u64 + 1))).await;
+                        // Jittered backoff: 30-80ms base + attempt * 20ms.
+                        // Jitter prevents thundering herd when many parallel
+                        // processes retry simultaneously.
+                        let base_ms = 30
+                            + (std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .subsec_nanos()
+                                % 50) as u64;
+                        let delay_ms = base_ms + (attempt as u64) * 20;
+                        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
                     }
                 }
             }

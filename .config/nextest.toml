@@ -2,9 +2,9 @@
 dir = "target/nextest"
 
 [profile.default]
-retries = 2
+retries = 0
 fail-fast = false
-slow-timeout = { period = "10s", terminate-after = 2 }
+slow-timeout = { period = "15s", terminate-after = 2 }
 
 # FDB directory layer operations conflict under high concurrency, so
 # storage integration tests must run one at a time.
@@ -16,7 +16,7 @@ test-group = 'serial-fdb'
 max-threads = 1
 
 [profile.ci]
-retries = 2
+retries = 0
 fail-fast = true
 
 [[profile.ci.overrides]]

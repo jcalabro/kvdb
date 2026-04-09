@@ -83,7 +83,9 @@ impl TestContext {
         });
 
         // Poll until the server is accepting connections (or timeout).
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        // 10s allows headroom for FDB directory open retries under
+        // heavy contention (parallel nextest processes).
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
         loop {
             if tokio::time::Instant::now() > deadline {
                 panic!("test server did not start accepting connections within 5 seconds on {addr}");
