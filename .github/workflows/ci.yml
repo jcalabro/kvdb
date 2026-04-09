@@ -41,4 +41,11 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
+
+      # Clippy must compile the crate, which depends on foundationdb-sys
+      - name: Install FoundationDB client
+        run: |
+          wget https://github.com/apple/foundationdb/releases/download/7.3.63/foundationdb-clients_7.3.63-1_amd64.deb
+          sudo dpkg -i foundationdb-clients_7.3.63-1_amd64.deb
+
       - run: just lint
