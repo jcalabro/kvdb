@@ -6,7 +6,7 @@
 |-----------|--------|-------|
 | M0: Project Skeleton | **Complete** | All exit criteria met. `just` inner loop at ~1.1s. 8 unit tests passing. |
 | M1: RESP3 Parser/Encoder | **Complete** | 99 unit tests, 15K+ proptest cases, 4 fuzz targets (2.2M+ runs, 0 crashes), criterion benchmarks. Parser: ~37ns simple, ~126ns SET cmd. Encoder: ~12ns simple, ~17ns bulk. 2 bugs found and fixed by fuzzer. |
-| M2: TCP Server Shell | Not started | |
+| M2: TCP Server Shell | **Complete** | Connection handler with read/parse/dispatch/encode/write loop. Pipelining support. PING, ECHO, HELLO, QUIT, COMMAND, CLIENT handlers. 10 unit tests, 6 integration tests, 120 total tests passing. redis-cli verified. |
 | M3: FDB Storage Layer | Not started | |
 | M4: String Commands | Not started | |
 | M5: Key Management & TTL | Not started | |
@@ -58,6 +58,16 @@
 - Full roundtrip (SET + OK): ~152ns (~6.5M ops/sec)
 
 **`just` inner loop**: 99 tests in ~0.5s. **`just accept`**: 15K+ proptest cases in ~1.1s. **`just fuzz`**: runs all 4 targets (default 30s each).
+
+### What's been built (M2)
+
+**Connection handler** (`src/server/connection.rs`) — Full read/parse/dispatch/encode/write loop with natural pipelining support. Reads into a `BytesMut` buffer, extracts all complete RESP frames via the M1 parser, dispatches each to a command handler, encodes responses via the M1 encoder, and flushes all accumulated responses in a single `write_all`. Per-connection state tracks protocol version (2/3) and selected database (0-15). Prometheus metrics: active connections, command counts by name/status, command duration histograms.
+
+**Command dispatch** (`src/commands/mod.rs`) — `CommandResponse` enum (Reply/Close) for connection lifecycle control. `dispatch()` takes `&mut ConnectionState` for protocol negotiation. Handlers: PING (with optional message), ECHO, HELLO (RESP2/RESP3 protocol negotiation), QUIT (clean close), COMMAND (COUNT/DOCS/LIST/INFO stubs), CLIENT (SETNAME/GETNAME/ID/INFO stubs). 10 unit tests.
+
+**Integration tests** (`tests/server.rs`) — 6 tests covering full TCP round-trip: PING, ECHO, PING with message, pipelining (100 commands), unknown command error, multi-connection independence. Each test uses `TestContext` with real server on random port.
+
+**`just` inner loop**: 120 tests in ~0.04s. **`just accept`**: 7 acceptance tests (15K+ proptest cases) in ~1.6s.
 
 ---
 
