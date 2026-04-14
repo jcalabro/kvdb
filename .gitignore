@@ -31,3 +31,6 @@ fuzz/corpus/
 
 /docs/superpowers
 .worktrees/
+
+# Local FDB data (created by 'just up' on macOS)
+.fdb/
