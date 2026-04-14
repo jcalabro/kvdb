@@ -1164,6 +1164,153 @@ async fn run_validate(addr: &str) -> bool {
         .query_async(&mut con)
         .await;
 
+    // -- Hash Commands ------------------------------------------------------
+    println!("Hash Commands");
+
+    let result: redis::RedisResult<i64> = redis::cmd("HSET")
+        .arg("smoke_hash")
+        .arg("f1")
+        .arg("v1")
+        .arg("f2")
+        .arg("v2")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("HSET multi-field", result, 2);
+
+    let result: redis::RedisResult<String> = redis::cmd("HGET")
+        .arg("smoke_hash")
+        .arg("f1")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("HGET", result, "v1".to_string());
+
+    let result: redis::RedisResult<i64> = redis::cmd("HLEN").arg("smoke_hash").query_async(&mut con).await;
+    t.check_eq("HLEN", result, 2);
+
+    let result: redis::RedisResult<i64> = redis::cmd("HEXISTS")
+        .arg("smoke_hash")
+        .arg("f1")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("HEXISTS", result, 1);
+
+    let result: redis::RedisResult<std::collections::HashMap<String, String>> =
+        redis::cmd("HGETALL").arg("smoke_hash").query_async(&mut con).await;
+    match result {
+        Ok(map) if map.len() == 2 && map.get("f1") == Some(&"v1".to_string()) => {
+            t.pass("HGETALL");
+        }
+        Ok(map) => t.fail("HGETALL", &format!("wrong map: {map:?}")),
+        Err(e) => t.fail("HGETALL", &format!("error: {e:?}")),
+    }
+
+    let result: redis::RedisResult<Vec<String>> = redis::cmd("HKEYS").arg("smoke_hash").query_async(&mut con).await;
+    match result {
+        Ok(mut keys) => {
+            keys.sort();
+            if keys == vec!["f1", "f2"] {
+                t.pass("HKEYS");
+            } else {
+                t.fail("HKEYS", &format!("wrong keys: {keys:?}"));
+            }
+        }
+        Err(e) => t.fail("HKEYS", &format!("error: {e:?}")),
+    }
+
+    let result: redis::RedisResult<Vec<String>> = redis::cmd("HVALS").arg("smoke_hash").query_async(&mut con).await;
+    match result {
+        Ok(mut vals) => {
+            vals.sort();
+            if vals == vec!["v1", "v2"] {
+                t.pass("HVALS");
+            } else {
+                t.fail("HVALS", &format!("wrong vals: {vals:?}"));
+            }
+        }
+        Err(e) => t.fail("HVALS", &format!("error: {e:?}")),
+    }
+
+    let result: redis::RedisResult<Vec<Option<String>>> = redis::cmd("HMGET")
+        .arg("smoke_hash")
+        .arg("f1")
+        .arg("nope")
+        .arg("f2")
+        .query_async(&mut con)
+        .await;
+    match result {
+        Ok(vals) if vals == vec![Some("v1".to_string()), None, Some("v2".to_string())] => {
+            t.pass("HMGET");
+        }
+        Ok(vals) => t.fail("HMGET", &format!("wrong results: {vals:?}")),
+        Err(e) => t.fail("HMGET", &format!("error: {e:?}")),
+    }
+
+    let result: redis::RedisResult<i64> = redis::cmd("HINCRBY")
+        .arg("smoke_hash")
+        .arg("counter")
+        .arg(10)
+        .query_async(&mut con)
+        .await;
+    t.check_eq("HINCRBY", result, 10);
+
+    let result: redis::RedisResult<String> = redis::cmd("HINCRBYFLOAT")
+        .arg("smoke_hash")
+        .arg("float_f")
+        .arg("1.5")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("HINCRBYFLOAT", result, "1.5".to_string());
+
+    let result: redis::RedisResult<i64> = redis::cmd("HSETNX")
+        .arg("smoke_hash")
+        .arg("f1")
+        .arg("new")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("HSETNX existing", result, 0);
+
+    let result: redis::RedisResult<i64> = redis::cmd("HSETNX")
+        .arg("smoke_hash")
+        .arg("newf")
+        .arg("newv")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("HSETNX new", result, 1);
+
+    let result: redis::RedisResult<i64> = redis::cmd("HSTRLEN")
+        .arg("smoke_hash")
+        .arg("f1")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("HSTRLEN", result, 2); // "v1" is 2 bytes
+
+    let result: redis::RedisResult<i64> = redis::cmd("HDEL")
+        .arg("smoke_hash")
+        .arg("f1")
+        .arg("f2")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("HDEL", result, 2);
+
+    let result: redis::RedisResult<String> = redis::cmd("HRANDFIELD").arg("smoke_hash").query_async(&mut con).await;
+    match result {
+        Ok(field) if ["counter", "float_f", "newf"].contains(&field.as_str()) => {
+            t.pass("HRANDFIELD");
+        }
+        Ok(field) => t.fail("HRANDFIELD", &format!("unexpected field: {field}")),
+        Err(e) => t.fail("HRANDFIELD", &format!("error: {e:?}")),
+    }
+
+    let result: redis::RedisResult<String> = redis::cmd("HMSET")
+        .arg("smoke_hmset")
+        .arg("a")
+        .arg("1")
+        .arg("b")
+        .arg("2")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("HMSET", result, "OK".to_string());
+
     // -- Post-error liveness check ------------------------------------------
     let result: redis::RedisResult<String> = redis::cmd("PING").query_async(&mut con).await;
     t.check_eq("server alive after errors", result, "PONG".to_string());
