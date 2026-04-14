@@ -246,11 +246,7 @@ async fn hdel_last_field_deletes_key() {
     assert_eq!(removed, 1);
 
     // Key itself should be gone now (EXISTS returns 0).
-    let exists: i64 = redis::cmd("EXISTS")
-        .arg("myhash")
-        .query_async(&mut con)
-        .await
-        .unwrap();
+    let exists: i64 = redis::cmd("EXISTS").arg("myhash").query_async(&mut con).await.unwrap();
     assert_eq!(exists, 0);
 }
 
@@ -309,11 +305,7 @@ async fn hlen_tracks_cardinality() {
     let mut con = ctx.connection().await;
 
     // Non-existent key returns 0.
-    let len: i64 = redis::cmd("HLEN")
-        .arg("myhash")
-        .query_async(&mut con)
-        .await
-        .unwrap();
+    let len: i64 = redis::cmd("HLEN").arg("myhash").query_async(&mut con).await.unwrap();
     assert_eq!(len, 0);
 
     // Add 2 fields.
@@ -327,11 +319,7 @@ async fn hlen_tracks_cardinality() {
         .await
         .unwrap();
 
-    let len: i64 = redis::cmd("HLEN")
-        .arg("myhash")
-        .query_async(&mut con)
-        .await
-        .unwrap();
+    let len: i64 = redis::cmd("HLEN").arg("myhash").query_async(&mut con).await.unwrap();
     assert_eq!(len, 2);
 
     // Delete 1 field.
@@ -342,11 +330,7 @@ async fn hlen_tracks_cardinality() {
         .await
         .unwrap();
 
-    let len: i64 = redis::cmd("HLEN")
-        .arg("myhash")
-        .query_async(&mut con)
-        .await
-        .unwrap();
+    let len: i64 = redis::cmd("HLEN").arg("myhash").query_async(&mut con).await.unwrap();
     assert_eq!(len, 1);
 }
 
@@ -371,11 +355,7 @@ async fn hgetall_returns_pairs() {
         .await
         .unwrap();
 
-    let result: HashMap<String, String> = redis::cmd("HGETALL")
-        .arg("myhash")
-        .query_async(&mut con)
-        .await
-        .unwrap();
+    let result: HashMap<String, String> = redis::cmd("HGETALL").arg("myhash").query_async(&mut con).await.unwrap();
 
     assert_eq!(result.len(), 3);
     assert_eq!(result.get("name").unwrap(), "alice");
@@ -412,19 +392,11 @@ async fn hkeys_and_hvals() {
         .await
         .unwrap();
 
-    let mut keys: Vec<String> = redis::cmd("HKEYS")
-        .arg("myhash")
-        .query_async(&mut con)
-        .await
-        .unwrap();
+    let mut keys: Vec<String> = redis::cmd("HKEYS").arg("myhash").query_async(&mut con).await.unwrap();
     keys.sort();
     assert_eq!(keys, vec!["alpha", "beta"]);
 
-    let mut vals: Vec<String> = redis::cmd("HVALS")
-        .arg("myhash")
-        .query_async(&mut con)
-        .await
-        .unwrap();
+    let mut vals: Vec<String> = redis::cmd("HVALS").arg("myhash").query_async(&mut con).await.unwrap();
     vals.sort();
     assert_eq!(vals, vec!["100", "200"]);
 }
@@ -727,10 +699,7 @@ async fn hrandfield_count_positive_distinct() {
     // All results should be distinct.
     let mut seen = std::collections::HashSet::new();
     for f in &fields {
-        assert!(
-            ["a", "b", "c"].contains(&f.as_str()),
-            "unexpected field: {f}"
-        );
+        assert!(["a", "b", "c"].contains(&f.as_str()), "unexpected field: {f}");
         assert!(seen.insert(f.clone()), "duplicate field in distinct mode: {f}");
     }
 }
@@ -803,18 +772,10 @@ async fn hash_del_removes_hash() {
         .await
         .unwrap();
 
-    let deleted: i64 = redis::cmd("DEL")
-        .arg("myhash")
-        .query_async(&mut con)
-        .await
-        .unwrap();
+    let deleted: i64 = redis::cmd("DEL").arg("myhash").query_async(&mut con).await.unwrap();
     assert_eq!(deleted, 1);
 
-    let len: i64 = redis::cmd("HLEN")
-        .arg("myhash")
-        .query_async(&mut con)
-        .await
-        .unwrap();
+    let len: i64 = redis::cmd("HLEN").arg("myhash").query_async(&mut con).await.unwrap();
     assert_eq!(len, 0);
 }
 
@@ -831,11 +792,7 @@ async fn hash_type_returns_hash() {
         .await
         .unwrap();
 
-    let key_type: String = redis::cmd("TYPE")
-        .arg("myhash")
-        .query_async(&mut con)
-        .await
-        .unwrap();
+    let key_type: String = redis::cmd("TYPE").arg("myhash").query_async(&mut con).await.unwrap();
     assert_eq!(key_type, "hash");
 }
 
@@ -860,11 +817,7 @@ async fn hash_expire_and_ttl() {
         .unwrap();
     assert_eq!(set, 1);
 
-    let ttl: i64 = redis::cmd("TTL")
-        .arg("myhash")
-        .query_async(&mut con)
-        .await
-        .unwrap();
+    let ttl: i64 = redis::cmd("TTL").arg("myhash").query_async(&mut con).await.unwrap();
     assert!(ttl > 0, "expected TTL > 0, got: {ttl}");
     assert!(ttl <= 100, "expected TTL <= 100, got: {ttl}");
 }
@@ -904,23 +857,14 @@ async fn hash_arity_errors() {
     let mut con = ctx.connection().await;
 
     // HSET with too few args (needs key + at least one field-value pair).
-    let result: redis::RedisResult<i64> = redis::cmd("HSET")
-        .arg("myhash")
-        .query_async(&mut con)
-        .await;
+    let result: redis::RedisResult<i64> = redis::cmd("HSET").arg("myhash").query_async(&mut con).await;
     assert!(result.is_err(), "HSET with 1 arg should error");
 
     // HGET with wrong arg count (needs exactly key + field).
-    let result: redis::RedisResult<String> = redis::cmd("HGET")
-        .arg("myhash")
-        .query_async(&mut con)
-        .await;
+    let result: redis::RedisResult<String> = redis::cmd("HGET").arg("myhash").query_async(&mut con).await;
     assert!(result.is_err(), "HGET with 1 arg should error");
 
     // HDEL with too few args (needs key + at least one field).
-    let result: redis::RedisResult<i64> = redis::cmd("HDEL")
-        .arg("myhash")
-        .query_async(&mut con)
-        .await;
+    let result: redis::RedisResult<i64> = redis::cmd("HDEL").arg("myhash").query_async(&mut con).await;
     assert!(result.is_err(), "HDEL with 1 arg should error");
 }
