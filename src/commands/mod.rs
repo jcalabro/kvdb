@@ -5,6 +5,7 @@
 //! Each command returns a `CommandResponse` that tells the connection
 //! handler whether to continue or close the connection.
 
+pub mod hashes;
 pub mod keys;
 pub mod strings;
 
