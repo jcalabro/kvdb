@@ -36,6 +36,9 @@ tracing-tracy = { version = "0.11", default-features = false, features = ["enabl
 # Async combinators
 futures = "0.3"
 
+# Random number generation (used by HRANDFIELD, SRANDMEMBER, etc.)
+rand = "0.8"
+
 # Storage: FoundationDB client + serialization
 foundationdb = { version = "0.10", features = ["fdb-7_3"] }
 serde = { version = "1", features = ["derive"] }
@@ -46,7 +49,6 @@ proptest = "1"
 criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 redis = { version = "0.27", features = ["tokio-comp", "aio"] }
 tokio = { version = "1", features = ["full", "test-util"] }
-rand = "0.8"
 uuid = { version = "1", features = ["v4"] }
 
 [profile.release]
