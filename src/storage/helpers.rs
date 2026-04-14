@@ -137,7 +137,7 @@ pub async fn delete_object(
 ///
 /// This is an internal helper used by `delete_object` and (later)
 /// type-change overwrites (e.g. SET on a key that was previously a hash).
-fn delete_data_for_meta(tr: &Transaction, dirs: &Directories, key: &[u8], meta: &ObjectMeta) {
+pub(crate) fn delete_data_for_meta(tr: &Transaction, dirs: &Directories, key: &[u8], meta: &ObjectMeta) {
     match meta.key_type {
         KeyType::String => {
             delete_chunks(tr, &dirs.obj, key);
@@ -170,6 +170,26 @@ fn delete_data_for_meta(tr: &Transaction, dirs: &Directories, key: &[u8], meta: 
             // Streams are not yet implemented — nothing to clear.
         }
     }
+}
+
+/// Delete all data, metadata, and expire entry for a key.
+///
+/// This is the consolidated cleanup helper for type-change overwrites
+/// and expired key reclamation. It clears type-specific data, the
+/// ObjectMeta entry, and any expire entry in a single sweep.
+pub fn delete_all_data_and_meta(
+    tr: &Transaction,
+    dirs: &Directories,
+    key: &[u8],
+    meta: &ObjectMeta,
+) -> Result<(), CommandError> {
+    delete_data_for_meta(tr, dirs, key, meta);
+    ObjectMeta::delete(tr, dirs, key).map_err(|e| CommandError::Generic(e.to_string()))?;
+    if meta.expires_at_ms > 0 {
+        let expire_key = dirs.expire_key(key);
+        tr.clear(&expire_key);
+    }
+    Ok(())
 }
 
 /// Get the current time in milliseconds since the Unix epoch.

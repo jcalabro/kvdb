@@ -89,6 +89,8 @@ pub async fn dispatch(cmd: &RedisCommand, state: &mut ConnectionState) -> Comman
         b"SELECT" => CommandResponse::Reply(keys::handle_select(&cmd.args, state).await),
         b"FLUSHDB" => CommandResponse::Reply(keys::handle_flushdb(&cmd.args, state).await),
         b"FLUSHALL" => CommandResponse::Reply(keys::handle_flushall(&cmd.args, state).await),
+        b"HSET" => CommandResponse::Reply(hashes::handle_hset(&cmd.args, state).await),
+        b"HGET" => CommandResponse::Reply(hashes::handle_hget(&cmd.args, state).await),
         _ => {
             let name_str = sanitize_for_error(&cmd.name);
             let mut msg = format!("ERR unknown command '{name_str}', with args beginning with:");
