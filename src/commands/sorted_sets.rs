@@ -14,6 +14,7 @@
 
 use bytes::Bytes;
 use foundationdb::{FdbBindingError, RangeOption, Transaction};
+use rand::Rng;
 
 use crate::error::CommandError;
 use crate::protocol::types::RespValue;
@@ -1459,6 +1460,260 @@ pub async fn handle_zremrangebylex(args: &[Bytes], state: &ConnectionState) -> R
     .await
     {
         Ok(count) => RespValue::Integer(count),
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ZPOPMIN key [count] / ZPOPMAX key [count]
+// ---------------------------------------------------------------------------
+
+/// Shared implementation for ZPOPMIN and ZPOPMAX.
+///
+/// Pops the lowest (pop_min=true) or highest (pop_min=false) scored members.
+/// Returns an interleaved array of [member, score, ...] pairs.
+async fn handle_zpop_impl(args: &[Bytes], state: &ConnectionState, cmd_name: &'static str, pop_min: bool) -> RespValue {
+    if args.is_empty() || args.len() > 2 {
+        return RespValue::err(CommandError::WrongArity { name: cmd_name.into() }.to_string());
+    }
+
+    let count: usize = if args.len() == 2 {
+        match std::str::from_utf8(&args[1]).ok().and_then(|s| s.parse::<i64>().ok()) {
+            Some(c) if c >= 0 => c as usize,
+            _ => return RespValue::err("ERR value is not an integer or out of range"),
+        }
+    } else {
+        1
+    };
+
+    match run_transact(&state.db, cmd_name, |tr| {
+        let dirs = state.dirs.clone();
+        let key = args[0].clone();
+        async move {
+            let (live_meta, old_cardinality, _) = read_zset_meta_for_write(&tr, &dirs, &key).await?;
+            if live_meta.is_none() {
+                return Ok(Vec::new());
+            }
+
+            let mut members = read_zset_members_by_score(&tr, &dirs, &key, false)
+                .await
+                .map_err(helpers::cmd_err)?;
+
+            if !pop_min {
+                members.reverse();
+            }
+
+            let n = count.min(members.len());
+            let popped: Vec<(f64, Vec<u8>)> = members.into_iter().take(n).collect();
+
+            for (score, member) in &popped {
+                zset_remove_member(&tr, &dirs, &key, member, *score);
+            }
+
+            let new_cardinality = (old_cardinality as i64 - popped.len() as i64) as u64;
+            write_or_delete_zset_meta(&tr, &dirs, &key, live_meta.as_ref(), new_cardinality)?;
+
+            Ok(popped)
+        }
+    })
+    .await
+    {
+        Ok(pairs) => {
+            let mut result = Vec::new();
+            for (score, member) in pairs {
+                result.push(RespValue::BulkString(Some(Bytes::from(member))));
+                result.push(RespValue::BulkString(Some(Bytes::from(format_score(score)))));
+            }
+            RespValue::Array(Some(result))
+        }
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+/// ZPOPMIN key [count] — Pop members with the lowest scores.
+pub async fn handle_zpopmin(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    handle_zpop_impl(args, state, "ZPOPMIN", true).await
+}
+
+/// ZPOPMAX key [count] — Pop members with the highest scores.
+pub async fn handle_zpopmax(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    handle_zpop_impl(args, state, "ZPOPMAX", false).await
+}
+
+// ---------------------------------------------------------------------------
+// ZRANDMEMBER key [count [WITHSCORES]]
+// ---------------------------------------------------------------------------
+
+/// ZRANDMEMBER key [count [WITHSCORES]]
+///
+/// Return random members without removing them.
+/// - No count: return one random member as BulkString, Nil if empty.
+/// - Positive count: up to `count` distinct members (Array).
+/// - Negative count: `|count|` members, may repeat (Array).
+pub async fn handle_zrandmember(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.is_empty() || args.len() > 3 {
+        return RespValue::err(
+            CommandError::WrongArity {
+                name: "ZRANDMEMBER".into(),
+            }
+            .to_string(),
+        );
+    }
+
+    let has_count = args.len() >= 2;
+    let count: i64 = if has_count {
+        match std::str::from_utf8(&args[1]).ok().and_then(|s| s.parse::<i64>().ok()) {
+            Some(v) => v,
+            None => return RespValue::err("ERR value is not an integer or out of range"),
+        }
+    } else {
+        0 // unused when has_count is false
+    };
+
+    let withscores = if args.len() == 3 {
+        if args[2].to_ascii_uppercase() == b"WITHSCORES".as_slice() {
+            true
+        } else {
+            return RespValue::err("ERR syntax error");
+        }
+    } else {
+        false
+    };
+
+    match run_transact(&state.db, "ZRANDMEMBER", |tr| {
+        let dirs = state.dirs.clone();
+        let key = args[0].clone();
+        async move {
+            let meta = read_zset_meta_for_read(&tr, &dirs, &key).await?;
+            match meta {
+                None => Ok(None),
+                Some(_) => {
+                    let members = read_zset_members_by_score(&tr, &dirs, &key, false)
+                        .await
+                        .map_err(helpers::cmd_err)?;
+                    Ok(Some(members))
+                }
+            }
+        }
+    })
+    .await
+    {
+        Ok(None) => {
+            if !has_count {
+                RespValue::BulkString(None)
+            } else {
+                RespValue::Array(Some(vec![]))
+            }
+        }
+        Ok(Some(members)) => {
+            if members.is_empty() {
+                if !has_count {
+                    return RespValue::BulkString(None);
+                } else {
+                    return RespValue::Array(Some(vec![]));
+                }
+            }
+
+            if !has_count {
+                // Single random member.
+                let mut rng = rand::thread_rng();
+                let idx = rng.gen_range(0..members.len());
+                return RespValue::BulkString(Some(Bytes::from(members[idx].1.clone())));
+            }
+
+            if count == 0 {
+                return RespValue::Array(Some(vec![]));
+            }
+
+            let mut rng = rand::thread_rng();
+
+            if count > 0 {
+                // Distinct selection: up to `count` unique members.
+                let n = (count as usize).min(members.len());
+                let mut indices: Vec<usize> = (0..members.len()).collect();
+                for i in 0..n {
+                    let j = rng.gen_range(i..indices.len());
+                    indices.swap(i, j);
+                }
+                let result: Vec<RespValue> = indices[..n]
+                    .iter()
+                    .flat_map(|&idx| {
+                        let mut items = vec![RespValue::BulkString(Some(Bytes::from(members[idx].1.clone())))];
+                        if withscores {
+                            items.push(RespValue::BulkString(Some(Bytes::from(format_score(members[idx].0)))));
+                        }
+                        items
+                    })
+                    .collect();
+                RespValue::Array(Some(result))
+            } else {
+                // count < 0: allow duplicates, return |count| members.
+                let n = count.unsigned_abs() as usize;
+                let result: Vec<RespValue> = (0..n)
+                    .flat_map(|_| {
+                        let idx = rng.gen_range(0..members.len());
+                        let mut items = vec![RespValue::BulkString(Some(Bytes::from(members[idx].1.clone())))];
+                        if withscores {
+                            items.push(RespValue::BulkString(Some(Bytes::from(format_score(members[idx].0)))));
+                        }
+                        items
+                    })
+                    .collect();
+                RespValue::Array(Some(result))
+            }
+        }
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ZMSCORE key member [member ...]
+// ---------------------------------------------------------------------------
+
+/// ZMSCORE key member [member ...] — Return scores for multiple members.
+///
+/// Returns an array where each element is the score (BulkString) or Nil.
+pub async fn handle_zmscore(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.len() < 2 {
+        return RespValue::err(CommandError::WrongArity { name: "ZMSCORE".into() }.to_string());
+    }
+
+    match run_transact(&state.db, "ZMSCORE", |tr| {
+        let dirs = state.dirs.clone();
+        let args = args.to_vec();
+        async move {
+            let key = &args[0];
+            let meta = read_zset_meta_for_read(&tr, &dirs, key).await?;
+
+            let mut scores: Vec<Option<f64>> = Vec::with_capacity(args.len() - 1);
+
+            if meta.is_none() {
+                // Key doesn't exist — all Nils.
+                for _ in 1..args.len() {
+                    scores.push(None);
+                }
+            } else {
+                for member in &args[1..] {
+                    let score = zset_get_score(&tr, &dirs, key, member, false).await?;
+                    scores.push(score);
+                }
+            }
+
+            Ok(scores)
+        }
+    })
+    .await
+    {
+        Ok(scores) => {
+            let result: Vec<RespValue> = scores
+                .into_iter()
+                .map(|s| match s {
+                    Some(score) => RespValue::BulkString(Some(Bytes::from(format_score(score)))),
+                    None => RespValue::BulkString(None),
+                })
+                .collect();
+            RespValue::Array(Some(result))
+        }
         Err(e) => helpers::storage_err_to_resp(e),
     }
 }

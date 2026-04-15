@@ -1529,3 +1529,261 @@ async fn zremrangebylex_basic() {
         .unwrap();
     assert_eq!(remaining, vec!["a", "d"]);
 }
+
+// ---------------------------------------------------------------------------
+// ZPOPMIN / ZPOPMAX
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn zpopmin_basic() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("a")
+        .arg(2.0)
+        .arg("b")
+        .arg(3.0)
+        .arg("c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let result: Vec<String> = redis::cmd("ZPOPMIN").arg("myzset").query_async(&mut con).await.unwrap();
+    assert_eq!(result, vec!["a", "1"]);
+
+    let card: i64 = redis::cmd("ZCARD").arg("myzset").query_async(&mut con).await.unwrap();
+    assert_eq!(card, 2);
+}
+
+#[tokio::test]
+async fn zpopmin_with_count() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("a")
+        .arg(2.0)
+        .arg("b")
+        .arg(3.0)
+        .arg("c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let result: Vec<String> = redis::cmd("ZPOPMIN")
+        .arg("myzset")
+        .arg(2)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(result, vec!["a", "1", "b", "2"]);
+
+    let card: i64 = redis::cmd("ZCARD").arg("myzset").query_async(&mut con).await.unwrap();
+    assert_eq!(card, 1);
+}
+
+#[tokio::test]
+async fn zpopmax_basic() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("a")
+        .arg(2.0)
+        .arg("b")
+        .arg(3.0)
+        .arg("c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let result: Vec<String> = redis::cmd("ZPOPMAX").arg("myzset").query_async(&mut con).await.unwrap();
+    assert_eq!(result, vec!["c", "3"]);
+}
+
+#[tokio::test]
+async fn zpopmin_empty() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let result: Vec<String> = redis::cmd("ZPOPMIN")
+        .arg("nosuchkey")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert!(result.is_empty());
+}
+
+#[tokio::test]
+async fn zpopmin_last_member_deletes_key() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("a")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let _: Vec<String> = redis::cmd("ZPOPMIN").arg("myzset").query_async(&mut con).await.unwrap();
+
+    let key_type: String = redis::cmd("TYPE").arg("myzset").query_async(&mut con).await.unwrap();
+    assert_eq!(key_type, "none");
+}
+
+// ---------------------------------------------------------------------------
+// ZRANDMEMBER
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn zrandmember_returns_member() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("a")
+        .arg(2.0)
+        .arg("b")
+        .arg(3.0)
+        .arg("c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let member: String = redis::cmd("ZRANDMEMBER")
+        .arg("myzset")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert!(
+        member == "a" || member == "b" || member == "c",
+        "unexpected member: {member}"
+    );
+}
+
+#[tokio::test]
+async fn zrandmember_positive_count_distinct() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("a")
+        .arg(2.0)
+        .arg("b")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // count > cardinality should return all distinct members.
+    let members: Vec<String> = redis::cmd("ZRANDMEMBER")
+        .arg("myzset")
+        .arg(10)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(members.len(), 2);
+    assert!(members.contains(&"a".to_string()));
+    assert!(members.contains(&"b".to_string()));
+}
+
+#[tokio::test]
+async fn zrandmember_negative_count_duplicates() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("a")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // Negative count on single-member set returns all duplicates.
+    let members: Vec<String> = redis::cmd("ZRANDMEMBER")
+        .arg("myzset")
+        .arg(-5)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(members.len(), 5);
+    for m in &members {
+        assert_eq!(m, "a");
+    }
+}
+
+#[tokio::test]
+async fn zrandmember_nonexistent() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let member: Option<String> = redis::cmd("ZRANDMEMBER")
+        .arg("nosuchkey")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(member, None);
+}
+
+// ---------------------------------------------------------------------------
+// ZMSCORE
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn zmscore_basic() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.5)
+        .arg("a")
+        .arg(2.5)
+        .arg("b")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let scores: Vec<Option<f64>> = redis::cmd("ZMSCORE")
+        .arg("myzset")
+        .arg("a")
+        .arg("nonexistent")
+        .arg("b")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(scores.len(), 3);
+    assert!((scores[0].unwrap() - 1.5).abs() < f64::EPSILON);
+    assert_eq!(scores[1], None);
+    assert!((scores[2].unwrap() - 2.5).abs() < f64::EPSILON);
+}
+
+#[tokio::test]
+async fn zmscore_nonexistent_key() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let scores: Vec<Option<f64>> = redis::cmd("ZMSCORE")
+        .arg("nosuchkey")
+        .arg("a")
+        .arg("b")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(scores.len(), 2);
+    assert_eq!(scores[0], None);
+    assert_eq!(scores[1], None);
+}
