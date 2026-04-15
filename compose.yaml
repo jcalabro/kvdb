@@ -1,6 +1,6 @@
 services:
   fdb-coordinator:
-    image: foundationdb/foundationdb:7.3.63
+    image: ghcr.io/bluesky-social/fdb-docker:sha-14945ef
     platform: "linux/amd64"
     container_name: kvdb-fdb-coordinator
     network_mode: host
@@ -11,7 +11,7 @@ services:
     depends_on:
       - fdb-coordinator
     platform: "linux/amd64"
-    image: foundationdb/foundationdb:7.3.63
+    image: ghcr.io/bluesky-social/fdb-docker:sha-14945ef
     container_name: kvdb-fdb-server-1
     network_mode: host
     environment:
@@ -23,7 +23,7 @@ services:
     depends_on:
       - fdb-coordinator
     platform: "linux/amd64"
-    image: foundationdb/foundationdb:7.3.63
+    image: ghcr.io/bluesky-social/fdb-docker:sha-14945ef
     container_name: kvdb-fdb-server-2
     network_mode: host
     environment:
@@ -35,7 +35,7 @@ services:
     depends_on:
       - fdb-coordinator
     platform: "linux/amd64"
-    image: foundationdb/foundationdb:7.3.63
+    image: ghcr.io/bluesky-social/fdb-docker:sha-14945ef
     container_name: kvdb-fdb-server-3
     network_mode: host
     environment:
