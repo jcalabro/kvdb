@@ -555,3 +555,187 @@ async fn zadd_arity_errors() {
         "expected arity error, got: {msg}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// ZRANK / ZREVRANK
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn zrank_basic() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("alice")
+        .arg(2.0)
+        .arg("bob")
+        .arg(3.0)
+        .arg("carol")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let rank: i64 = redis::cmd("ZRANK")
+        .arg("myzset")
+        .arg("alice")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(rank, 0);
+
+    let rank: i64 = redis::cmd("ZRANK")
+        .arg("myzset")
+        .arg("bob")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(rank, 1);
+
+    let rank: i64 = redis::cmd("ZRANK")
+        .arg("myzset")
+        .arg("carol")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(rank, 2);
+}
+
+#[tokio::test]
+async fn zrevrank_basic() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("alice")
+        .arg(2.0)
+        .arg("bob")
+        .arg(3.0)
+        .arg("carol")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let rank: i64 = redis::cmd("ZREVRANK")
+        .arg("myzset")
+        .arg("alice")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(rank, 2);
+
+    let rank: i64 = redis::cmd("ZREVRANK")
+        .arg("myzset")
+        .arg("carol")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(rank, 0);
+}
+
+#[tokio::test]
+async fn zrank_nonexistent_member() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("alice")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let rank: Option<i64> = redis::cmd("ZRANK")
+        .arg("myzset")
+        .arg("nosuchmember")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(rank, None);
+}
+
+#[tokio::test]
+async fn zrank_nonexistent_key() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let rank: Option<i64> = redis::cmd("ZRANK")
+        .arg("nosuchkey")
+        .arg("member")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(rank, None);
+}
+
+// ---------------------------------------------------------------------------
+// ZINCRBY
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn zincrby_new_member() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let score: f64 = redis::cmd("ZINCRBY")
+        .arg("myzset")
+        .arg(5.0)
+        .arg("alice")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert!((score - 5.0).abs() < f64::EPSILON);
+
+    let card: i64 = redis::cmd("ZCARD").arg("myzset").query_async(&mut con).await.unwrap();
+    assert_eq!(card, 1);
+}
+
+#[tokio::test]
+async fn zincrby_existing_member() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(10.0)
+        .arg("alice")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let score: f64 = redis::cmd("ZINCRBY")
+        .arg("myzset")
+        .arg(5.0)
+        .arg("alice")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert!((score - 15.0).abs() < f64::EPSILON);
+}
+
+#[tokio::test]
+async fn zincrby_negative_increment() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(10.0)
+        .arg("alice")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let score: f64 = redis::cmd("ZINCRBY")
+        .arg("myzset")
+        .arg(-3.0)
+        .arg("alice")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert!((score - 7.0).abs() < f64::EPSILON);
+}

@@ -707,6 +707,127 @@ pub async fn handle_zrem(args: &[Bytes], state: &ConnectionState) -> RespValue {
 }
 
 // ---------------------------------------------------------------------------
+// ZRANK key member / ZREVRANK key member
+// ---------------------------------------------------------------------------
+
+/// Shared implementation for ZRANK and ZREVRANK.
+///
+/// Returns the 0-based rank of a member ordered by ascending score (ZRANK)
+/// or descending score (ZREVRANK). Returns Nil if the key or member doesn't
+/// exist.
+async fn handle_rank_impl(args: &[Bytes], state: &ConnectionState, cmd_name: &'static str, reverse: bool) -> RespValue {
+    if args.len() != 2 {
+        return RespValue::err(CommandError::WrongArity { name: cmd_name.into() }.to_string());
+    }
+
+    match run_transact(&state.db, cmd_name, |tr| {
+        let dirs = state.dirs.clone();
+        let key = args[0].clone();
+        let member = args[1].clone();
+        async move {
+            let meta = read_zset_meta_for_read(&tr, &dirs, &key).await?;
+            if meta.is_none() {
+                return Ok(None);
+            }
+
+            let score = zset_get_score(&tr, &dirs, &key, &member, false).await?;
+            let score = match score {
+                Some(s) => s,
+                None => return Ok(None),
+            };
+
+            let members = read_zset_members_by_score(&tr, &dirs, &key, false)
+                .await
+                .map_err(helpers::cmd_err)?;
+
+            // Find the position of (score, member) in the list.
+            let pos = members
+                .iter()
+                .position(|(s, m)| s.to_bits() == score.to_bits() && m.as_slice() == member.as_ref());
+
+            match pos {
+                Some(p) => {
+                    let rank = if reverse { members.len() - 1 - p } else { p };
+                    Ok(Some(rank as i64))
+                }
+                None => Ok(None),
+            }
+        }
+    })
+    .await
+    {
+        Ok(Some(rank)) => RespValue::Integer(rank),
+        Ok(None) => RespValue::BulkString(None),
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+/// ZRANK key member — Returns the 0-based rank of a member (ascending score).
+pub async fn handle_zrank(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    handle_rank_impl(args, state, "ZRANK", false).await
+}
+
+/// ZREVRANK key member — Returns the 0-based rank of a member (descending score).
+pub async fn handle_zrevrank(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    handle_rank_impl(args, state, "ZREVRANK", true).await
+}
+
+// ---------------------------------------------------------------------------
+// ZINCRBY key increment member
+// ---------------------------------------------------------------------------
+
+/// ZINCRBY key increment member — Increment a member's score.
+///
+/// If the member doesn't exist, it's created with the increment as score.
+/// Returns the new score as a BulkString.
+pub async fn handle_zincrby(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.len() != 3 {
+        return RespValue::err(CommandError::WrongArity { name: "ZINCRBY".into() }.to_string());
+    }
+
+    let increment = match parse_score_arg(&args[1]) {
+        Ok(v) => v,
+        Err(e) => return RespValue::err(e.to_string()),
+    };
+
+    match run_transact(&state.db, "ZINCRBY", |tr| {
+        let dirs = state.dirs.clone();
+        let key = args[0].clone();
+        let member = args[2].clone();
+        async move {
+            let (live_meta, old_cardinality, _old_expires_at_ms) = read_zset_meta_for_write(&tr, &dirs, &key).await?;
+
+            let existing_score = zset_get_score(&tr, &dirs, &key, &member, false).await?;
+            let old_score = existing_score.unwrap_or(0.0);
+            let new_score = old_score + increment;
+
+            if new_score.is_nan() {
+                return Err(helpers::cmd_err(CommandError::Generic(
+                    "ERR resulting score is not a number (NaN)".into(),
+                )));
+            }
+
+            zset_set_member(&tr, &dirs, &key, &member, new_score, existing_score);
+
+            let new_cardinality = if existing_score.is_none() {
+                old_cardinality + 1
+            } else {
+                old_cardinality
+            };
+
+            write_or_delete_zset_meta(&tr, &dirs, &key, live_meta.as_ref(), new_cardinality)?;
+
+            Ok(format_score(new_score))
+        }
+    })
+    .await
+    {
+        Ok(score_str) => RespValue::BulkString(Some(Bytes::from(score_str))),
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
