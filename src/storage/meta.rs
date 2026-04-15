@@ -121,6 +121,26 @@ impl ObjectMeta {
         }
     }
 
+    /// Create metadata for a new list key.
+    ///
+    /// `list_head` and `list_tail` are both inclusive bounds. For a
+    /// single-element list, both equal 0 and `list_length` is 1.
+    /// For an empty list, callers should delete the key entirely
+    /// rather than writing meta with length == 0.
+    pub fn new_list(list_head: i64, list_tail: i64, list_length: u64) -> Self {
+        Self {
+            key_type: KeyType::List,
+            num_chunks: 0,
+            size_bytes: 0,
+            expires_at_ms: 0,
+            cardinality: 0,
+            last_accessed_ms: 0,
+            list_head,
+            list_tail,
+            list_length,
+        }
+    }
+
     /// Returns `true` if this key has expired relative to `now_ms`.
     ///
     /// Redis semantics: a key expires AT the specified timestamp, meaning
@@ -237,6 +257,17 @@ mod tests {
         let bytes = meta.serialize().unwrap();
         let decoded = ObjectMeta::deserialize(&bytes).unwrap();
         assert_eq!(meta, decoded);
+    }
+
+    #[test]
+    fn new_list_constructor() {
+        let meta = ObjectMeta::new_list(-5, 4, 10);
+        assert_eq!(meta.key_type, KeyType::List);
+        assert_eq!(meta.list_head, -5);
+        assert_eq!(meta.list_tail, 4);
+        assert_eq!(meta.list_length, 10);
+        assert_eq!(meta.expires_at_ms, 0);
+        assert_eq!(meta.cardinality, 0);
     }
 
     #[test]

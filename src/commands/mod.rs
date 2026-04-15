@@ -7,6 +7,7 @@
 
 pub mod hashes;
 pub mod keys;
+pub mod lists;
 pub mod sets;
 pub mod strings;
 pub(crate) mod util;
@@ -122,6 +123,20 @@ pub async fn dispatch(cmd: &RedisCommand, state: &mut ConnectionState) -> Comman
         b"SUNIONSTORE" => CommandResponse::Reply(sets::handle_sunionstore(&cmd.args, state).await),
         b"SDIFFSTORE" => CommandResponse::Reply(sets::handle_sdiffstore(&cmd.args, state).await),
         b"SINTERCARD" => CommandResponse::Reply(sets::handle_sintercard(&cmd.args, state).await),
+        b"LPUSH" => CommandResponse::Reply(lists::handle_lpush(&cmd.args, state).await),
+        b"RPUSH" => CommandResponse::Reply(lists::handle_rpush(&cmd.args, state).await),
+        b"LPUSHX" => CommandResponse::Reply(lists::handle_lpushx(&cmd.args, state).await),
+        b"RPUSHX" => CommandResponse::Reply(lists::handle_rpushx(&cmd.args, state).await),
+        b"LPOP" => CommandResponse::Reply(lists::handle_lpop(&cmd.args, state).await),
+        b"RPOP" => CommandResponse::Reply(lists::handle_rpop(&cmd.args, state).await),
+        b"LLEN" => CommandResponse::Reply(lists::handle_llen(&cmd.args, state).await),
+        b"LINDEX" => CommandResponse::Reply(lists::handle_lindex(&cmd.args, state).await),
+        b"LRANGE" => CommandResponse::Reply(lists::handle_lrange(&cmd.args, state).await),
+        b"LSET" => CommandResponse::Reply(lists::handle_lset(&cmd.args, state).await),
+        b"LTRIM" => CommandResponse::Reply(lists::handle_ltrim(&cmd.args, state).await),
+        b"LREM" => CommandResponse::Reply(lists::handle_lrem(&cmd.args, state).await),
+        b"LINSERT" => CommandResponse::Reply(lists::handle_linsert(&cmd.args, state).await),
+        b"LPOS" => CommandResponse::Reply(lists::handle_lpos(&cmd.args, state).await),
         _ => {
             let name_str = sanitize_for_error(&cmd.name);
             let mut msg = format!("ERR unknown command '{name_str}', with args beginning with:");

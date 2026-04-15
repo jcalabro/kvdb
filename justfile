@@ -1,6 +1,8 @@
 set shell := ["bash", "-cu"]
 
-# FDB version — must match across Docker image, native install, and client library
+# FoundationDB version for the macOS client library install.
+# The server runs in Docker (see compose.yaml), but the rust-foundationdb
+# crate still links against libfdb_c on the host at build time.
 fdb_version := "7.3.63"
 
 # Default: lint + fast tests. Your inner loop — must stay under 2 seconds.
@@ -25,124 +27,19 @@ lint:
     cargo clippy --workspace --tests --examples -- -D warnings
     cargo fmt --check
 
-# Start FDB — native on macOS, Docker on Linux
+# Start the local FDB cluster (Docker).
+# Works on Linux and macOS (Docker Desktop with Rosetta).
+# --wait blocks until the container's healthcheck reports the DB available.
 up:
-    #!/usr/bin/env bash
-    set -euo pipefail
+    docker compose up -d --wait
 
-    case "$(uname -s)" in
-        Darwin)
-            fdb_server=/usr/local/libexec/fdbserver
-            fdb_monitor=/usr/local/libexec/fdbmonitor
-            if ! [ -x "$fdb_server" ] || ! [ -x "$fdb_monitor" ]; then
-                echo "FDB binaries not found. Run 'just install-macos' first."
-                exit 1
-            fi
-
-            installed=$("$fdb_server" --version 2>&1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-            if [ "$installed" != "v{{fdb_version}}" ]; then
-                echo "fdbserver $installed does not match required v{{fdb_version}}"
-                echo "Run 'just install-macos' to install the correct version."
-                exit 1
-            fi
-
-            if [ -f .fdb/fdbmonitor.pid ] && sudo kill -0 "$(cat .fdb/fdbmonitor.pid)" 2>/dev/null; then
-                echo "FDB already running (pid $(cat .fdb/fdbmonitor.pid))"
-            else
-                mkdir -p .fdb/data/4500 .fdb/logs
-
-                # Generate project-local fdbmonitor config with absolute paths
-                cat > .fdb/foundationdb.conf <<CONF
-    [general]
-    restart-delay = 10
-    cluster-file = $(pwd)/fdb.cluster
-
-    [fdbserver]
-    command = $fdb_server
-    public-address = auto:\$ID
-    listen-address = public
-    datadir = $(pwd)/.fdb/data/\$ID
-    logdir = $(pwd)/.fdb/logs
-    logsize = 10MiB
-    maxlogssize = 100MiB
-
-    [fdbserver.4500]
-    CONF
-
-                # fdbserver requires root on macOS for shared memory (shm_open)
-                sudo "$fdb_monitor" \
-                    --conffile "$(pwd)/.fdb/foundationdb.conf" \
-                    --lockfile "$(pwd)/.fdb/fdbmonitor.pid" \
-                    --daemonize
-                echo "Started fdbmonitor (pid $(cat .fdb/fdbmonitor.pid))"
-            fi
-            ;;
-        Linux)
-            docker compose up -d
-            ;;
-        *)
-            echo "Unsupported OS: $(uname -s)"
-            exit 1
-            ;;
-    esac
-
-    # Wait for FDB to accept connections. On first run, configure the cluster.
-    for attempt in $(seq 1 30); do
-        if fdbcli -C fdb.cluster --exec "status" --timeout 2 2>/dev/null; then
-            echo "FDB cluster is ready"
-            exit 0
-        fi
-        if [ "$attempt" -eq 1 ]; then
-            echo "Configuring new FDB cluster..."
-        fi
-        if fdbcli -C fdb.cluster --exec "configure new single ssd-redwood-1 ; status" --timeout 5 2>/dev/null; then
-            echo "FDB cluster is ready"
-            exit 0
-        fi
-        sleep 1
-    done
-
-    echo "FDB did not become ready after 30s"
-    exit 1
-
-# Stop FDB — kills native process on macOS, docker compose down on Linux
+# Stop the local FDB cluster.
 down:
-    #!/usr/bin/env bash
-    set -euo pipefail
+    docker compose down --remove-orphans
 
-    case "$(uname -s)" in
-        Darwin)
-            if [ -f .fdb/fdbmonitor.pid ]; then
-                pid=$(cat .fdb/fdbmonitor.pid)
-                if sudo kill -0 "$pid" 2>/dev/null; then
-                    sudo kill "$pid"
-                    for _ in $(seq 1 20); do
-                        sudo kill -0 "$pid" 2>/dev/null || break
-                        sleep 0.5
-                    done
-                    if sudo kill -0 "$pid" 2>/dev/null; then
-                        echo "fdbmonitor did not exit cleanly, sending SIGKILL"
-                        sudo kill -9 "$pid" 2>/dev/null || true
-                    fi
-                    echo "Stopped fdbmonitor (pid $pid)"
-                else
-                    echo "fdbmonitor (pid $pid) was not running"
-                fi
-                sudo rm -f .fdb/fdbmonitor.pid
-            else
-                echo "No FDB pid file found"
-            fi
-            ;;
-        Linux)
-            docker compose down --remove-orphans
-            ;;
-        *)
-            echo "Unsupported OS: $(uname -s)"
-            exit 1
-            ;;
-    esac
-
-# Install FoundationDB on macOS (requires sudo for .pkg)
+# Install the FoundationDB client library + fdbcli on macOS (requires sudo for .pkg).
+# Needed so the rust-foundationdb crate can link against libfdb_c.dylib.
+# The server itself runs in Docker — see 'just up'.
 install-macos:
     #!/usr/bin/env bash
     set -euo pipefail

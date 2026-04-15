@@ -11,14 +11,16 @@ A Redis-compatible database built on [FoundationDB](https://apple.github.io/foun
 
 ## Setup
 
-On macOS:
+FoundationDB runs in Docker on both Linux and macOS.
+
+On macOS, first install the FDB client library (the `rust-foundationdb` crate links against `libfdb_c.dylib` at build time). Docker Desktop's Rosetta x86/64 emulation must be enabled (Settings → General → "Use Rosetta for x86/amd64 emulation on Apple Silicon").
 
 ```
-just install-macos
+just install-macos   # macOS only — installs libfdb_c + fdbcli
 just up
 ```
 
-On Linux, `just up` uses Docker Compose instead.
+On Linux, install the FDB client package (`foundationdb-clients_7.3.63-1_amd64.deb` from the FoundationDB releases page), then `just up`.
 
 ## Dev loop
 

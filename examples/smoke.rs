@@ -1548,6 +1548,259 @@ async fn run_validate(addr: &str) -> bool {
         Ok(v) => t.fail("SADD WRONGTYPE on string", &format!("expected error, got: {v}")),
     }
 
+    // -- List Commands ------------------------------------------------------
+    println!("List Commands");
+
+    // LPUSH / RPUSH / LLEN
+    let result: redis::RedisResult<i64> = redis::cmd("LPUSH")
+        .arg("smoke_list")
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("LPUSH three elements", result, 3);
+
+    let result: redis::RedisResult<i64> = redis::cmd("RPUSH")
+        .arg("smoke_list")
+        .arg("d")
+        .arg("e")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("RPUSH two elements", result, 5);
+
+    let result: redis::RedisResult<i64> = redis::cmd("LLEN").arg("smoke_list").query_async(&mut con).await;
+    t.check_eq("LLEN after push", result, 5);
+
+    // LRANGE: LPUSH reversed order + RPUSH appended -> [c, b, a, d, e]
+    let result: redis::RedisResult<Vec<String>> = redis::cmd("LRANGE")
+        .arg("smoke_list")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await;
+    t.check_eq(
+        "LRANGE full list",
+        result,
+        vec!["c".to_string(), "b".into(), "a".into(), "d".into(), "e".into()],
+    );
+
+    // LINDEX positive + negative
+    let result: redis::RedisResult<String> = redis::cmd("LINDEX")
+        .arg("smoke_list")
+        .arg(0)
+        .query_async(&mut con)
+        .await;
+    t.check_eq("LINDEX 0", result, "c".to_string());
+
+    let result: redis::RedisResult<String> = redis::cmd("LINDEX")
+        .arg("smoke_list")
+        .arg(-1)
+        .query_async(&mut con)
+        .await;
+    t.check_eq("LINDEX -1", result, "e".to_string());
+
+    // LINDEX out of range returns Nil
+    let result: redis::RedisResult<Option<String>> = redis::cmd("LINDEX")
+        .arg("smoke_list")
+        .arg(100)
+        .query_async(&mut con)
+        .await;
+    t.check_eq("LINDEX out of range", result, None::<String>);
+
+    // LPOP / RPOP single
+    let result: redis::RedisResult<String> = redis::cmd("LPOP").arg("smoke_list").query_async(&mut con).await;
+    t.check_eq("LPOP single", result, "c".to_string());
+
+    let result: redis::RedisResult<String> = redis::cmd("RPOP").arg("smoke_list").query_async(&mut con).await;
+    t.check_eq("RPOP single", result, "e".to_string());
+
+    // LPOP with count
+    let result: redis::RedisResult<Vec<String>> =
+        redis::cmd("LPOP").arg("smoke_list").arg(2).query_async(&mut con).await;
+    t.check_eq("LPOP with count=2", result, vec!["b".to_string(), "a".into()]);
+
+    // LSET + LINDEX round-trip
+    let _: redis::RedisResult<i64> = redis::cmd("DEL").arg("smoke_list").query_async(&mut con).await;
+    let _: redis::RedisResult<i64> = redis::cmd("RPUSH")
+        .arg("smoke_list")
+        .arg("x")
+        .arg("y")
+        .arg("z")
+        .query_async(&mut con)
+        .await;
+    let result: redis::RedisResult<String> = redis::cmd("LSET")
+        .arg("smoke_list")
+        .arg(1)
+        .arg("Y")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("LSET OK", result, "OK".to_string());
+    let result: redis::RedisResult<String> = redis::cmd("LINDEX")
+        .arg("smoke_list")
+        .arg(1)
+        .query_async(&mut con)
+        .await;
+    t.check_eq("LINDEX after LSET", result, "Y".to_string());
+
+    // LSET out of range
+    let result: redis::RedisResult<String> = redis::cmd("LSET")
+        .arg("smoke_list")
+        .arg(100)
+        .arg("z")
+        .query_async(&mut con)
+        .await;
+    t.check_err("LSET out of range errors", result);
+
+    // LTRIM
+    let _: redis::RedisResult<i64> = redis::cmd("DEL").arg("smoke_list").query_async(&mut con).await;
+    let _: redis::RedisResult<i64> = redis::cmd("RPUSH")
+        .arg("smoke_list")
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .arg("d")
+        .arg("e")
+        .query_async(&mut con)
+        .await;
+    let result: redis::RedisResult<String> = redis::cmd("LTRIM")
+        .arg("smoke_list")
+        .arg(1)
+        .arg(3)
+        .query_async(&mut con)
+        .await;
+    t.check_eq("LTRIM 1..3", result, "OK".to_string());
+    let result: redis::RedisResult<Vec<String>> = redis::cmd("LRANGE")
+        .arg("smoke_list")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await;
+    t.check_eq(
+        "LRANGE after LTRIM",
+        result,
+        vec!["b".to_string(), "c".into(), "d".into()],
+    );
+
+    // LINSERT before/after
+    let result: redis::RedisResult<i64> = redis::cmd("LINSERT")
+        .arg("smoke_list")
+        .arg("BEFORE")
+        .arg("c")
+        .arg("BB")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("LINSERT BEFORE", result, 4);
+
+    let result: redis::RedisResult<i64> = redis::cmd("LINSERT")
+        .arg("smoke_list")
+        .arg("AFTER")
+        .arg("c")
+        .arg("CC")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("LINSERT AFTER", result, 5);
+
+    // LINSERT missing pivot
+    let result: redis::RedisResult<i64> = redis::cmd("LINSERT")
+        .arg("smoke_list")
+        .arg("BEFORE")
+        .arg("nope")
+        .arg("X")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("LINSERT missing pivot returns -1", result, -1);
+
+    // LREM
+    let _: redis::RedisResult<i64> = redis::cmd("DEL").arg("smoke_list").query_async(&mut con).await;
+    let _: redis::RedisResult<i64> = redis::cmd("RPUSH")
+        .arg("smoke_list")
+        .arg("a")
+        .arg("b")
+        .arg("a")
+        .arg("b")
+        .arg("a")
+        .query_async(&mut con)
+        .await;
+    let result: redis::RedisResult<i64> = redis::cmd("LREM")
+        .arg("smoke_list")
+        .arg(2)
+        .arg("a")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("LREM count=2", result, 2);
+
+    let result: redis::RedisResult<i64> = redis::cmd("LREM")
+        .arg("smoke_list")
+        .arg(0)
+        .arg("a")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("LREM count=0 removes remaining match", result, 1);
+
+    // LPOS
+    let _: redis::RedisResult<i64> = redis::cmd("DEL").arg("smoke_list").query_async(&mut con).await;
+    let _: redis::RedisResult<i64> = redis::cmd("RPUSH")
+        .arg("smoke_list")
+        .arg("a")
+        .arg("b")
+        .arg("a")
+        .arg("c")
+        .arg("a")
+        .query_async(&mut con)
+        .await;
+    let result: redis::RedisResult<i64> = redis::cmd("LPOS")
+        .arg("smoke_list")
+        .arg("a")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("LPOS first match", result, 0);
+
+    let result: redis::RedisResult<Vec<i64>> = redis::cmd("LPOS")
+        .arg("smoke_list")
+        .arg("a")
+        .arg("COUNT")
+        .arg(0)
+        .query_async(&mut con)
+        .await;
+    t.check_eq("LPOS COUNT=0 returns all", result, vec![0i64, 2, 4]);
+
+    // LPUSHX / RPUSHX on nonexistent key: no-op
+    let result: redis::RedisResult<i64> = redis::cmd("LPUSHX")
+        .arg("smoke_list_missing")
+        .arg("x")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("LPUSHX on missing key", result, 0);
+
+    // WRONGTYPE: LPUSH on string key
+    let _: redis::RedisResult<String> = redis::cmd("SET")
+        .arg("smoke_str_for_list")
+        .arg("hi")
+        .query_async(&mut con)
+        .await;
+    let result: redis::RedisResult<i64> = redis::cmd("LPUSH")
+        .arg("smoke_str_for_list")
+        .arg("x")
+        .query_async(&mut con)
+        .await;
+    match result {
+        Err(e) if format!("{e}").contains("WRONGTYPE") => t.pass("LPUSH WRONGTYPE on string"),
+        Err(e) => t.fail("LPUSH WRONGTYPE on string", &format!("wrong error: {e:?}")),
+        Ok(v) => t.fail("LPUSH WRONGTYPE on string", &format!("expected error, got: {v}")),
+    }
+
+    // Empty-list auto-deletion: pop all, verify EXISTS == 0
+    let _: redis::RedisResult<i64> = redis::cmd("DEL").arg("smoke_list").query_async(&mut con).await;
+    let _: redis::RedisResult<i64> = redis::cmd("RPUSH")
+        .arg("smoke_list")
+        .arg("x")
+        .query_async(&mut con)
+        .await;
+    let _: redis::RedisResult<String> = redis::cmd("LPOP").arg("smoke_list").query_async(&mut con).await;
+    let result: redis::RedisResult<i64> = redis::cmd("EXISTS").arg("smoke_list").query_async(&mut con).await;
+    t.check_eq("EXISTS=0 after final pop", result, 0);
+
     // -- Post-error liveness check ------------------------------------------
     let result: redis::RedisResult<String> = redis::cmd("PING").query_async(&mut con).await;
     t.check_eq("server alive after errors", result, "PONG".to_string());

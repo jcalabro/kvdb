@@ -1,44 +1,26 @@
+# Single-node FoundationDB for local development.
+#
+# Mirrors the upstream bluesky-social/fdb-docker layout: bridge networking
+# with a published port, so the same compose file works on Linux and macOS
+# (Docker Desktop with Rosetta). The kvdb server and fdbcli on the host
+# reach FDB at 127.0.0.1:4500 via the port mapping.
+#
+# The pinned image auto-runs `configure new single ssd` on first boot,
+# so no separate initialization step is needed.
+
 services:
-  fdb-coordinator:
-    image: ghcr.io/bluesky-social/fdb-docker:sha-14945ef
-    platform: "linux/amd64"
-    container_name: kvdb-fdb-coordinator
-    network_mode: host
+  fdb:
+    image: ghcr.io/bluesky-social/fdb-docker:sha-ea0bf12
+    container_name: kvdb-fdb
     environment:
-      FDB_NETWORKING_MODE: host
-
-  fdb-server-1:
-    depends_on:
-      - fdb-coordinator
-    platform: "linux/amd64"
-    image: ghcr.io/bluesky-social/fdb-docker:sha-14945ef
-    container_name: kvdb-fdb-server-1
-    network_mode: host
-    environment:
-      FDB_NETWORKING_MODE: host
-      FDB_PORT: 4501
-      FDB_COORDINATOR: localhost
-
-  fdb-server-2:
-    depends_on:
-      - fdb-coordinator
-    platform: "linux/amd64"
-    image: ghcr.io/bluesky-social/fdb-docker:sha-14945ef
-    container_name: kvdb-fdb-server-2
-    network_mode: host
-    environment:
-      FDB_NETWORKING_MODE: host
-      FDB_PORT: 4502
-      FDB_COORDINATOR: localhost
-
-  fdb-server-3:
-    depends_on:
-      - fdb-coordinator
-    platform: "linux/amd64"
-    image: ghcr.io/bluesky-social/fdb-docker:sha-14945ef
-    container_name: kvdb-fdb-server-3
-    network_mode: host
-    environment:
-      FDB_NETWORKING_MODE: host
-      FDB_PORT: 4503
-      FDB_COORDINATOR: localhost
+      - FDB_PORT=4500
+    ports:
+      - "4500:4500"
+    tmpfs:
+      - /var/fdb/data
+    healthcheck:
+      test: ["CMD-SHELL", "fdbcli -C /var/fdb/cluster/fdb.cluster --exec 'status minimal' | grep -q available"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
