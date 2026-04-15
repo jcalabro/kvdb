@@ -739,3 +739,308 @@ async fn zincrby_negative_increment() {
         .unwrap();
     assert!((score - 7.0).abs() < f64::EPSILON);
 }
+
+// ---------------------------------------------------------------------------
+// ZRANGE / ZREVRANGE
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn zrange_ascending_order() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(3.0)
+        .arg("carol")
+        .arg(1.0)
+        .arg("alice")
+        .arg(2.0)
+        .arg("bob")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let members: Vec<String> = redis::cmd("ZRANGE")
+        .arg("myzset")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(members, vec!["alice", "bob", "carol"]);
+}
+
+#[tokio::test]
+async fn zrange_with_scores() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("alice")
+        .arg(2.0)
+        .arg("bob")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let result: Vec<String> = redis::cmd("ZRANGE")
+        .arg("myzset")
+        .arg(0)
+        .arg(-1)
+        .arg("WITHSCORES")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(result, vec!["alice", "1", "bob", "2"]);
+}
+
+#[tokio::test]
+async fn zrange_subset() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("a")
+        .arg(2.0)
+        .arg("b")
+        .arg(3.0)
+        .arg("c")
+        .arg(4.0)
+        .arg("d")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let members: Vec<String> = redis::cmd("ZRANGE")
+        .arg("myzset")
+        .arg(1)
+        .arg(2)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(members, vec!["b", "c"]);
+}
+
+#[tokio::test]
+async fn zrange_negative_indices() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("a")
+        .arg(2.0)
+        .arg("b")
+        .arg(3.0)
+        .arg("c")
+        .arg(4.0)
+        .arg("d")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let members: Vec<String> = redis::cmd("ZRANGE")
+        .arg("myzset")
+        .arg(-2)
+        .arg(-1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(members, vec!["c", "d"]);
+}
+
+#[tokio::test]
+async fn zrange_empty() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let members: Vec<String> = redis::cmd("ZRANGE")
+        .arg("nosuchkey")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert!(members.is_empty());
+}
+
+#[tokio::test]
+async fn zrevrange_basic() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("alice")
+        .arg(2.0)
+        .arg("bob")
+        .arg(3.0)
+        .arg("carol")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let members: Vec<String> = redis::cmd("ZREVRANGE")
+        .arg("myzset")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(members, vec!["carol", "bob", "alice"]);
+}
+
+// ---------------------------------------------------------------------------
+// ZCOUNT
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn zcount_basic() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("a")
+        .arg(2.0)
+        .arg("b")
+        .arg(3.0)
+        .arg("c")
+        .arg(4.0)
+        .arg("d")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let count: i64 = redis::cmd("ZCOUNT")
+        .arg("myzset")
+        .arg(2)
+        .arg(3)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+}
+
+#[tokio::test]
+async fn zcount_inf() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("a")
+        .arg(2.0)
+        .arg("b")
+        .arg(3.0)
+        .arg("c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let count: i64 = redis::cmd("ZCOUNT")
+        .arg("myzset")
+        .arg("-inf")
+        .arg("+inf")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(count, 3);
+}
+
+#[tokio::test]
+async fn zcount_exclusive() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("a")
+        .arg(2.0)
+        .arg("b")
+        .arg(3.0)
+        .arg("c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let count: i64 = redis::cmd("ZCOUNT")
+        .arg("myzset")
+        .arg("(1")
+        .arg("(3")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(count, 1); // Only score 2.
+}
+
+#[tokio::test]
+async fn zcount_empty_range() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("a")
+        .arg(2.0)
+        .arg("b")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let count: i64 = redis::cmd("ZCOUNT")
+        .arg("myzset")
+        .arg(10)
+        .arg(20)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+// ---------------------------------------------------------------------------
+// ZLEXCOUNT
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn zlexcount_basic() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // All same score for meaningful lex ordering.
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(0.0)
+        .arg("a")
+        .arg(0.0)
+        .arg("b")
+        .arg(0.0)
+        .arg("c")
+        .arg(0.0)
+        .arg("d")
+        .arg(0.0)
+        .arg("e")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let count: i64 = redis::cmd("ZLEXCOUNT")
+        .arg("myzset")
+        .arg("[b")
+        .arg("[d")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(count, 3); // b, c, d
+}

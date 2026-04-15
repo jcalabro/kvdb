@@ -145,6 +145,10 @@ pub async fn dispatch(cmd: &RedisCommand, state: &mut ConnectionState) -> Comman
         b"ZRANK" => CommandResponse::Reply(sorted_sets::handle_zrank(&cmd.args, state).await),
         b"ZREVRANK" => CommandResponse::Reply(sorted_sets::handle_zrevrank(&cmd.args, state).await),
         b"ZINCRBY" => CommandResponse::Reply(sorted_sets::handle_zincrby(&cmd.args, state).await),
+        b"ZRANGE" => CommandResponse::Reply(sorted_sets::handle_zrange(&cmd.args, state).await),
+        b"ZREVRANGE" => CommandResponse::Reply(sorted_sets::handle_zrevrange(&cmd.args, state).await),
+        b"ZCOUNT" => CommandResponse::Reply(sorted_sets::handle_zcount(&cmd.args, state).await),
+        b"ZLEXCOUNT" => CommandResponse::Reply(sorted_sets::handle_zlexcount(&cmd.args, state).await),
         _ => {
             let name_str = sanitize_for_error(&cmd.name);
             let mut msg = format!("ERR unknown command '{name_str}', with args beginning with:");

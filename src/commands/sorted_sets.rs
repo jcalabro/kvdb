@@ -828,6 +828,212 @@ pub async fn handle_zincrby(args: &[Bytes], state: &ConnectionState) -> RespValu
 }
 
 // ---------------------------------------------------------------------------
+// ZRANGE key start stop [WITHSCORES] / ZREVRANGE key start stop [WITHSCORES]
+// ---------------------------------------------------------------------------
+
+/// Shared implementation for ZRANGE and ZREVRANGE.
+///
+/// Returns members in rank range. Supports negative indices and WITHSCORES.
+/// ZRANGE returns ascending score order, ZREVRANGE returns descending.
+async fn handle_range_by_rank(
+    args: &[Bytes],
+    state: &ConnectionState,
+    cmd_name: &'static str,
+    reverse: bool,
+) -> RespValue {
+    // Minimum: key start stop. Optional: WITHSCORES.
+    if args.len() < 3 || args.len() > 4 {
+        return RespValue::err(CommandError::WrongArity { name: cmd_name.into() }.to_string());
+    }
+
+    let start = match std::str::from_utf8(&args[1]).ok().and_then(|s| s.parse::<i64>().ok()) {
+        Some(v) => v,
+        None => return RespValue::err("ERR value is not an integer or out of range"),
+    };
+    let stop = match std::str::from_utf8(&args[2]).ok().and_then(|s| s.parse::<i64>().ok()) {
+        Some(v) => v,
+        None => return RespValue::err("ERR value is not an integer or out of range"),
+    };
+
+    let withscores = if args.len() == 4 {
+        if args[3].to_ascii_uppercase() == b"WITHSCORES".as_slice() {
+            true
+        } else {
+            return RespValue::err("ERR syntax error");
+        }
+    } else {
+        false
+    };
+
+    match run_transact(&state.db, cmd_name, |tr| {
+        let dirs = state.dirs.clone();
+        let key = args[0].clone();
+        async move {
+            let meta = read_zset_meta_for_read(&tr, &dirs, &key).await?;
+            if meta.is_none() {
+                return Ok(Vec::new());
+            }
+
+            let mut members = read_zset_members_by_score(&tr, &dirs, &key, false)
+                .await
+                .map_err(helpers::cmd_err)?;
+
+            if reverse {
+                members.reverse();
+            }
+
+            let len = members.len() as i64;
+
+            // Normalize negative indices.
+            let norm_start = if start < 0 {
+                (len + start).max(0)
+            } else {
+                start.min(len)
+            };
+            let norm_stop = if stop < 0 {
+                (len + stop).max(-1)
+            } else {
+                stop.min(len - 1)
+            };
+
+            if norm_start > norm_stop || norm_start >= len {
+                return Ok(Vec::new());
+            }
+
+            let slice = &members[norm_start as usize..=norm_stop as usize];
+            Ok(slice.to_vec())
+        }
+    })
+    .await
+    {
+        Ok(pairs) => {
+            let mut result = Vec::new();
+            for (score, member) in pairs {
+                result.push(RespValue::BulkString(Some(Bytes::from(member))));
+                if withscores {
+                    result.push(RespValue::BulkString(Some(Bytes::from(format_score(score)))));
+                }
+            }
+            RespValue::Array(Some(result))
+        }
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+/// ZRANGE key start stop [WITHSCORES] — Return members in ascending rank order.
+pub async fn handle_zrange(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    handle_range_by_rank(args, state, "ZRANGE", false).await
+}
+
+/// ZREVRANGE key start stop [WITHSCORES] — Return members in descending rank order.
+pub async fn handle_zrevrange(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    handle_range_by_rank(args, state, "ZREVRANGE", true).await
+}
+
+// ---------------------------------------------------------------------------
+// ZCOUNT key min max
+// ---------------------------------------------------------------------------
+
+/// ZCOUNT key min max — Count members with scores in [min, max].
+///
+/// Uses score bound syntax: `-inf`, `+inf`, `(exclusive`, `inclusive`.
+pub async fn handle_zcount(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.len() != 3 {
+        return RespValue::err(CommandError::WrongArity { name: "ZCOUNT".into() }.to_string());
+    }
+
+    let min = match parse_score_bound(&args[1]) {
+        Ok(v) => v,
+        Err(e) => return RespValue::err(e.to_string()),
+    };
+    let max = match parse_score_bound(&args[2]) {
+        Ok(v) => v,
+        Err(e) => return RespValue::err(e.to_string()),
+    };
+
+    match run_transact(&state.db, "ZCOUNT", |tr| {
+        let dirs = state.dirs.clone();
+        let key = args[0].clone();
+        let min = min.clone();
+        let max = max.clone();
+        async move {
+            let meta = read_zset_meta_for_read(&tr, &dirs, &key).await?;
+            if meta.is_none() {
+                return Ok(0i64);
+            }
+
+            let members = read_zset_members_by_score(&tr, &dirs, &key, false)
+                .await
+                .map_err(helpers::cmd_err)?;
+
+            let count = members.iter().filter(|(s, _)| score_in_range(*s, &min, &max)).count();
+            Ok(count as i64)
+        }
+    })
+    .await
+    {
+        Ok(count) => RespValue::Integer(count),
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ZLEXCOUNT key min max
+// ---------------------------------------------------------------------------
+
+/// ZLEXCOUNT key min max — Count members in a lex range.
+///
+/// All members must have the same score for meaningful results.
+/// Uses lex bound syntax: `-`, `+`, `[inclusive`, `(exclusive`.
+pub async fn handle_zlexcount(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.len() != 3 {
+        return RespValue::err(
+            CommandError::WrongArity {
+                name: "ZLEXCOUNT".into(),
+            }
+            .to_string(),
+        );
+    }
+
+    let min = match parse_lex_bound(&args[1]) {
+        Ok(v) => v,
+        Err(e) => return RespValue::err(e.to_string()),
+    };
+    let max = match parse_lex_bound(&args[2]) {
+        Ok(v) => v,
+        Err(e) => return RespValue::err(e.to_string()),
+    };
+
+    match run_transact(&state.db, "ZLEXCOUNT", |tr| {
+        let dirs = state.dirs.clone();
+        let key = args[0].clone();
+        let min = min.clone();
+        let max = max.clone();
+        async move {
+            let meta = read_zset_meta_for_read(&tr, &dirs, &key).await?;
+            if meta.is_none() {
+                return Ok(0i64);
+            }
+
+            let members = read_zset_members_by_score(&tr, &dirs, &key, false)
+                .await
+                .map_err(helpers::cmd_err)?;
+
+            let count = members
+                .iter()
+                .filter(|(_, m)| member_in_lex_range(m.as_slice(), &min, &max))
+                .count();
+            Ok(count as i64)
+        }
+    })
+    .await
+    {
+        Ok(count) => RespValue::Integer(count),
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
