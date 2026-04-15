@@ -9,6 +9,7 @@ pub mod hashes;
 pub mod keys;
 pub mod lists;
 pub mod sets;
+pub mod sorted_sets;
 pub mod strings;
 pub(crate) mod util;
 
