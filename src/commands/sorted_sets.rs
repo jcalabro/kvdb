@@ -16,7 +16,12 @@
 // They are pub(crate) and will be used once ZADD, ZRANGE, etc. land.
 #![allow(dead_code)]
 
+use foundationdb::{FdbBindingError, RangeOption, Transaction};
+
 use crate::error::CommandError;
+use crate::storage::directories::Directories;
+use crate::storage::helpers;
+use crate::storage::meta::{KeyType, ObjectMeta};
 
 // ---------------------------------------------------------------------------
 // Score bound types and parsing
@@ -150,6 +155,282 @@ pub(crate) fn member_lte_lex_bound(member: &[u8], bound: &LexBound) -> bool {
 /// Returns `true` if `member` is within the lex range `[min, max]`.
 pub(crate) fn member_in_lex_range(member: &[u8], min: &LexBound, max: &LexBound) -> bool {
     member_gte_lex_bound(member, min) && member_lte_lex_bound(member, max)
+}
+
+// ---------------------------------------------------------------------------
+// Score byte helpers
+// ---------------------------------------------------------------------------
+
+/// Encode a score as big-endian bytes for storage in `zset_idx` values.
+pub(crate) fn score_to_bytes(score: f64) -> [u8; 8] {
+    score.to_be_bytes()
+}
+
+/// Decode a score from big-endian bytes stored in `zset_idx` values.
+pub(crate) fn score_from_bytes(bytes: &[u8]) -> Result<f64, CommandError> {
+    let arr: [u8; 8] = bytes
+        .try_into()
+        .map_err(|_| CommandError::Generic(format!("invalid score bytes: expected 8, got {}", bytes.len())))?;
+    Ok(f64::from_be_bytes(arr))
+}
+
+// ---------------------------------------------------------------------------
+// Score parsing / formatting
+// ---------------------------------------------------------------------------
+
+/// Parse a byte argument as an f64 score, rejecting NaN.
+///
+/// Redis rejects NaN scores: `ZADD key NaN member` returns an error.
+pub(crate) fn parse_score_arg(arg: &[u8]) -> Result<f64, CommandError> {
+    let s = std::str::from_utf8(arg).map_err(|_| CommandError::Generic("ERR value is not a valid float".into()))?;
+
+    let val: f64 = s
+        .parse()
+        .map_err(|_| CommandError::Generic("ERR value is not a valid float".into()))?;
+
+    if val.is_nan() {
+        return Err(CommandError::Generic("ERR value is not a valid float".into()));
+    }
+
+    Ok(val)
+}
+
+/// Format an f64 score for Redis RESP output.
+///
+/// - Integer-valued scores have no decimal: `1.0` → `"1"`
+/// - Infinity: `"inf"` / `"-inf"`
+/// - Otherwise: minimal decimal representation
+pub(crate) fn format_score(score: f64) -> String {
+    if score == f64::INFINITY {
+        return "inf".to_string();
+    }
+    if score == f64::NEG_INFINITY {
+        return "-inf".to_string();
+    }
+    if score.fract() == 0.0 && score.is_finite() {
+        // Same boundary check as util::format_redis_float.
+        if score >= i64::MIN as f64 && score < i64::MAX as f64 {
+            return format!("{}", score as i64);
+        }
+    }
+
+    let mut s = ryu::Buffer::new().format(score).to_string();
+    if s.contains('.') {
+        let trimmed = s.trim_end_matches('0');
+        let trimmed = trimmed.trim_end_matches('.');
+        s.truncate(trimmed.len());
+    }
+    s
+}
+
+// ---------------------------------------------------------------------------
+// Meta read helpers
+// ---------------------------------------------------------------------------
+
+/// Read the live ObjectMeta for a sorted set key (write path).
+///
+/// Reads WITHOUT expiry filtering so expired/wrong-type data can be
+/// cleaned up in the same transaction. Returns `(live_meta,
+/// old_cardinality, old_expires_at_ms)`.
+///
+/// Returns `Err(WRONGTYPE)` if the key is live and not a sorted set.
+pub(crate) async fn read_zset_meta_for_write(
+    tr: &Transaction,
+    dirs: &Directories,
+    key: &[u8],
+) -> Result<(Option<ObjectMeta>, u64, u64), FdbBindingError> {
+    let now = helpers::now_ms();
+
+    // Read meta WITHOUT expiry filtering so we can clean up expired data.
+    let raw_meta = ObjectMeta::read(tr, dirs, key, 0, false)
+        .await
+        .map_err(helpers::storage_err)?;
+
+    // Determine if the key is live (exists and not expired).
+    let live_meta = raw_meta.as_ref().filter(|m| !m.is_expired(now));
+
+    // Type check: if the key is live and not a sorted set, reject.
+    if let Some(m) = live_meta
+        && m.key_type != KeyType::SortedSet
+    {
+        return Err(helpers::cmd_err(CommandError::WrongType));
+    }
+
+    // If old meta exists and is either the wrong type or expired, clean up.
+    if let Some(old_meta) = &raw_meta
+        && (old_meta.is_expired(now) || old_meta.key_type != KeyType::SortedSet)
+    {
+        helpers::delete_all_data_and_meta(tr, dirs, key, old_meta).map_err(helpers::cmd_err)?;
+    }
+
+    let old_cardinality = live_meta.map_or(0, |m| m.cardinality);
+    let old_expires_at_ms = live_meta.map_or(0, |m| m.expires_at_ms);
+
+    Ok((live_meta.cloned(), old_cardinality, old_expires_at_ms))
+}
+
+/// Read the live ObjectMeta for a sorted set key (read-only path).
+///
+/// Returns `Ok(None)` if the key doesn't exist or is expired.
+/// Returns `Err(WRONGTYPE)` if the key exists but is not a sorted set.
+pub(crate) async fn read_zset_meta_for_read(
+    tr: &Transaction,
+    dirs: &Directories,
+    key: &[u8],
+) -> Result<Option<ObjectMeta>, FdbBindingError> {
+    let now = helpers::now_ms();
+
+    let meta = ObjectMeta::read(tr, dirs, key, now, false)
+        .await
+        .map_err(helpers::storage_err)?;
+
+    match meta {
+        None => Ok(None),
+        Some(m) => {
+            if m.key_type != KeyType::SortedSet {
+                return Err(helpers::cmd_err(CommandError::WrongType));
+            }
+            Ok(Some(m))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dual-index mutation helpers
+// ---------------------------------------------------------------------------
+
+/// Set a member's score in a sorted set, maintaining both indexes.
+///
+/// If `old_score` is `Some` and differs from `score` (compared via
+/// `to_bits()` to distinguish -0.0 from 0.0), the old score index
+/// entry is removed before the new one is written.
+pub(crate) fn zset_set_member(
+    tr: &Transaction,
+    dirs: &Directories,
+    key: &[u8],
+    member: &[u8],
+    score: f64,
+    old_score: Option<f64>,
+) {
+    // If the score changed, remove the old score index entry.
+    if let Some(old) = old_score
+        && old.to_bits() != score.to_bits()
+    {
+        let old_zset_key = dirs.zset.pack(&(key, old, member));
+        tr.clear(&old_zset_key);
+    }
+
+    // Write the score index entry: zset/<key, score, member> → b""
+    let zset_key = dirs.zset.pack(&(key, score, member));
+    tr.set(&zset_key, b"");
+
+    // Write the reverse index entry: zset_idx/<key, member> → score_bytes
+    let idx_key = dirs.zset_idx.pack(&(key, member));
+    tr.set(&idx_key, &score_to_bytes(score));
+}
+
+/// Remove a member from a sorted set, clearing both indexes.
+pub(crate) fn zset_remove_member(tr: &Transaction, dirs: &Directories, key: &[u8], member: &[u8], score: f64) {
+    // Clear score index: zset/<key, score, member>
+    let zset_key = dirs.zset.pack(&(key, score, member));
+    tr.clear(&zset_key);
+
+    // Clear reverse index: zset_idx/<key, member>
+    let idx_key = dirs.zset_idx.pack(&(key, member));
+    tr.clear(&idx_key);
+}
+
+/// Look up a member's score via the reverse index (`zset_idx`).
+///
+/// Returns `None` if the member does not exist in the sorted set.
+pub(crate) async fn zset_get_score(
+    tr: &Transaction,
+    dirs: &Directories,
+    key: &[u8],
+    member: &[u8],
+    snapshot: bool,
+) -> Result<Option<f64>, FdbBindingError> {
+    let idx_key = dirs.zset_idx.pack(&(key, member));
+    let val = tr.get(&idx_key, snapshot).await?;
+
+    match val {
+        None => Ok(None),
+        Some(bytes) => {
+            let score = score_from_bytes(&bytes).map_err(helpers::cmd_err)?;
+            Ok(Some(score))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Read helper: paginated range read of sorted set members
+// ---------------------------------------------------------------------------
+
+/// Read all members of a sorted set in score order via paginated range read.
+///
+/// Returns `Vec<(score, member)>` ordered by (score, member).
+/// Uses the `zset/<key, score, member>` index for natural ordering.
+pub(crate) async fn read_zset_members_by_score(
+    tr: &Transaction,
+    dirs: &Directories,
+    key: &[u8],
+    snapshot: bool,
+) -> Result<Vec<(f64, Vec<u8>)>, CommandError> {
+    let sub = dirs.zset.subspace(&(key,));
+    let (begin, end) = sub.range();
+    let mut maybe_range: Option<RangeOption<'_>> = Some(RangeOption::from((begin.as_slice(), end.as_slice())));
+    let mut members = Vec::new();
+    let mut iteration = 1;
+
+    while let Some(range_opt) = maybe_range.take() {
+        let kvs = tr
+            .get_range(&range_opt, iteration, snapshot)
+            .await
+            .map_err(|e| CommandError::Generic(e.to_string()))?;
+
+        for kv in kvs.iter() {
+            let (_, score, member): (Vec<u8>, f64, Vec<u8>) = dirs
+                .zset
+                .unpack(kv.key())
+                .map_err(|e| CommandError::Generic(format!("zset key unpack: {e:?}")))?;
+            members.push((score, member));
+        }
+
+        maybe_range = range_opt.next_range(&kvs);
+        iteration += 1;
+    }
+
+    Ok(members)
+}
+
+// ---------------------------------------------------------------------------
+// Write helper: write or delete sorted set meta
+// ---------------------------------------------------------------------------
+
+/// Write updated ObjectMeta for a sorted set, or delete the key if empty.
+///
+/// If `new_cardinality` is 0, the key is deleted entirely (meta + data +
+/// expire). Otherwise, meta is written with the new cardinality, preserving
+/// the TTL from `old_meta` if it was set.
+pub(crate) fn write_or_delete_zset_meta(
+    tr: &Transaction,
+    dirs: &Directories,
+    key: &[u8],
+    old_meta: Option<&ObjectMeta>,
+    new_cardinality: u64,
+) -> Result<(), FdbBindingError> {
+    if new_cardinality == 0 {
+        // Delete the key entirely.
+        if let Some(old) = old_meta {
+            helpers::delete_all_data_and_meta(tr, dirs, key, old).map_err(helpers::cmd_err)?;
+        }
+    } else {
+        let old_expires = old_meta.map_or(0, |m| m.expires_at_ms);
+        let mut meta = ObjectMeta::new_sorted_set(new_cardinality);
+        meta.expires_at_ms = old_expires;
+        meta.write(tr, dirs, key).map_err(helpers::storage_err)?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -351,5 +632,72 @@ mod tests {
         assert!(member_in_lex_range(b"b", &min, &max));
         assert!(member_in_lex_range(b"c", &min, &max));
         assert!(!member_in_lex_range(b"d", &min, &max));
+    }
+
+    // -- Score bytes roundtrip --
+
+    #[test]
+    fn score_bytes_roundtrip() {
+        let cases = [0.0, -0.0, 1.0, -1.0, f64::INFINITY, f64::NEG_INFINITY, 1e100, -1e100, 0.1];
+        for score in cases {
+            let bytes = score_to_bytes(score);
+            let decoded = score_from_bytes(&bytes).unwrap();
+            assert_eq!(
+                score.to_bits(),
+                decoded.to_bits(),
+                "roundtrip failed for {score}"
+            );
+        }
+    }
+
+    #[test]
+    fn score_from_bytes_wrong_length() {
+        assert!(score_from_bytes(&[1, 2, 3]).is_err());
+        assert!(score_from_bytes(&[]).is_err());
+        assert!(score_from_bytes(&[0; 9]).is_err());
+    }
+
+    // -- format_score --
+
+    #[test]
+    fn format_score_integers() {
+        assert_eq!(format_score(0.0), "0");
+        assert_eq!(format_score(1.0), "1");
+        assert_eq!(format_score(-42.0), "-42");
+    }
+
+    #[test]
+    fn format_score_fractions() {
+        assert_eq!(format_score(1.5), "1.5");
+        assert_eq!(format_score(-0.5), "-0.5");
+    }
+
+    #[test]
+    fn format_score_infinity() {
+        assert_eq!(format_score(f64::INFINITY), "inf");
+        assert_eq!(format_score(f64::NEG_INFINITY), "-inf");
+    }
+
+    // -- parse_score_arg --
+
+    #[test]
+    fn parse_score_arg_valid() {
+        assert_eq!(parse_score_arg(b"0").unwrap(), 0.0);
+        assert_eq!(parse_score_arg(b"1.5").unwrap(), 1.5);
+        assert_eq!(parse_score_arg(b"-42").unwrap(), -42.0);
+        assert_eq!(parse_score_arg(b"inf").unwrap(), f64::INFINITY);
+        assert_eq!(parse_score_arg(b"-inf").unwrap(), f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn parse_score_arg_rejects_nan() {
+        assert!(parse_score_arg(b"NaN").is_err());
+        assert!(parse_score_arg(b"nan").is_err());
+    }
+
+    #[test]
+    fn parse_score_arg_rejects_garbage() {
+        assert!(parse_score_arg(b"abc").is_err());
+        assert!(parse_score_arg(b"").is_err());
     }
 }
