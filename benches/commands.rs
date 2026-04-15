@@ -254,9 +254,8 @@ async fn start_bench_server() -> (
     tokio::sync::broadcast::Sender<()>,
     tokio::task::JoinHandle<()>,
 ) {
-    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = probe.local_addr().unwrap();
-    drop(probe);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
 
     let root_prefix = format!("kvdb_bench_{}", uuid::Uuid::new_v4());
     let db = Database::new("fdb.cluster").expect("failed to open FDB — is `just up` running?");
@@ -271,7 +270,7 @@ async fn start_bench_server() -> (
     let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
 
     let handle = tokio::spawn(async move {
-        let _ = kvdb::server::listener::run(config, shutdown_rx).await;
+        let _ = kvdb::server::listener::run(config, shutdown_rx, Some(listener)).await;
     });
 
     // Poll until the server accepts connections.

@@ -58,10 +58,11 @@ impl TestContext {
 
     /// Start a server on a random port with the given config.
     pub async fn new_with_config(mut config: ServerConfig) -> Self {
-        // Bind to port 0 to get a random available port.
-        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = probe.local_addr().unwrap();
-        drop(probe);
+        // Bind to port 0 and pass the listener directly to the server,
+        // eliminating the TOCTOU race where another process grabs the
+        // port between our probe and the server's bind.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
 
         config.bind_addr = addr;
 
@@ -76,7 +77,7 @@ impl TestContext {
 
         let server_config = config.clone();
         let server_handle = tokio::spawn(async move {
-            if let Err(e) = kvdb::server::listener::run(server_config, shutdown_rx).await {
+            if let Err(e) = kvdb::server::listener::run(server_config, shutdown_rx, Some(listener)).await {
                 // Only log if it's not a shutdown-related error.
                 eprintln!("test server error: {e}");
             }
@@ -88,7 +89,7 @@ impl TestContext {
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
         loop {
             if tokio::time::Instant::now() > deadline {
-                panic!("test server did not start accepting connections within 5 seconds on {addr}");
+                panic!("test server did not start accepting connections within 10 seconds on {addr}");
             }
             match tokio::net::TcpStream::connect(addr).await {
                 Ok(_) => break,

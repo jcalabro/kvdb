@@ -33,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
         let _ = shutdown_tx.send(());
     });
 
-    kvdb::server::listener::run(config, shutdown_rx).await?;
+    kvdb::server::listener::run(config, shutdown_rx, None).await?;
 
     info!("kvdb shut down cleanly");
     Ok(())

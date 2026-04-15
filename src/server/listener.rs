@@ -20,7 +20,15 @@ use crate::ttl;
 ///
 /// This function runs until the `shutdown` future resolves, at which
 /// point it stops accepting new connections and returns.
-pub async fn run(config: ServerConfig, shutdown: tokio::sync::broadcast::Receiver<()>) -> anyhow::Result<()> {
+///
+/// If `pre_bound` is `Some`, the server uses that listener instead of
+/// binding a new one. This eliminates the port-reuse TOCTOU race in
+/// tests (bind port 0 → drop → rebind).
+pub async fn run(
+    config: ServerConfig,
+    shutdown: tokio::sync::broadcast::Receiver<()>,
+    pre_bound: Option<TcpListener>,
+) -> anyhow::Result<()> {
     // Initialize FDB: use injected handles (tests) or create fresh ones.
     let db = match config.db {
         Some(ref db) => db.clone(),
@@ -43,7 +51,10 @@ pub async fn run(config: ServerConfig, shutdown: tokio::sync::broadcast::Receive
         ttl::worker::run(worker_ns_cache, ttl::ExpiryConfig::default(), worker_cancel).await;
     });
 
-    let listener = TcpListener::bind(config.bind_addr).await?;
+    let listener = match pre_bound {
+        Some(l) => l,
+        None => TcpListener::bind(config.bind_addr).await?,
+    };
     let semaphore = Arc::new(Semaphore::new(config.max_connections));
 
     info!(addr = %config.bind_addr, "listening for connections");
