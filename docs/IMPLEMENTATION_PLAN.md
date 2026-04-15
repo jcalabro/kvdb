@@ -920,13 +920,29 @@ Each data structure milestone follows the same two-tier test pattern:
 
 ### Milestone 9: List Commands
 
-**Commands**: LPUSH, RPUSH, LPOP, RPOP, LLEN, LINDEX, LRANGE, LSET, LTRIM, LREM, LPUSHX, RPUSHX, LINSERT, LPOS, LMOVE, LMPOP.
+**Commands**: LPUSH, RPUSH, LPOP, RPOP, LLEN, LINDEX, LRANGE, LSET, LTRIM, LREM, LPUSHX, RPUSHX, LINSERT, LPOS.
 
-**`just test`**: LPUSH/RPUSH/LPOP/RPOP round-trip, LRANGE returns correct order, LINDEX with positive and negative indices, LINSERT BEFORE/AFTER, LMOVE between two lists.
+**Design**: Index-based storage (not linked-list). Elements stored at `list/<key, i64_index>`. ObjectMeta tracks `list_head` (inclusive), `list_tail` (inclusive), `list_length`. LPUSH decrements head, RPUSH increments tail, giving O(1) push/pop and O(1) random access via LINDEX. LINSERT/LREM use compact-rewrite (read all, splice, clear range, rewrite at [0, N-1]) — O(n) same as Redis. See `docs/M9_LIST_PLAN.md` for full design.
+
+**`just test`**: LPUSH/RPUSH/LPOP/RPOP round-trip, LRANGE returns correct order, LINDEX with positive and negative indices, LINSERT BEFORE/AFTER, LREM with positive/negative/zero count, LPOS with RANK/COUNT, LTRIM boundary cases.
 
 **`just accept`**: Property tests — LLEN(LPUSH(k, v)) == LLEN(k) + 1, LPUSH then LPOP returns same element. Randomized interleaved LPUSH/RPUSH/LPOP/RPOP sequences verified against VecDeque model. LRANGE on lists with 5K elements. LREM/LTRIM correctness after random insertions.
 
 **Exit criteria for M6-M9**: Each milestone's acceptance tests pass via `just accept`. All prior milestones' acceptance tests still pass. WRONGTYPE enforcement works across all types. `just test` still under 2 seconds. `just accept` under 15 seconds.
+
+---
+
+### Milestone 9.5: Cross-Key List Commands
+
+**Commands**: LMOVE, LMPOP.
+
+**Why separate**: These commands involve cross-key atomicity (LMOVE pops from one list and pushes to another; LMPOP scans multiple keys). FDB makes this trivially atomic within a single transaction, but the commands are more complex to implement and were added to Redis relatively late (6.2+). Separating them keeps M9 focused on the core list data structure.
+
+**`just test`**: LMOVE between two lists (LEFT/RIGHT x LEFT/RIGHT), LMOVE same-key rotation, LMOVE from nonexistent key returns Nil, LMPOP pops from first non-empty list in order, LMPOP with COUNT, LMPOP all keys empty returns Nil.
+
+**`just accept`**: LMOVE preserves element values across source/destination, LMOVE source deletion when emptied, LMPOP ordering determinism (always picks first non-empty key).
+
+**Exit criteria**: All M9 + M9.5 acceptance tests pass. Prior milestones unaffected. `just test` under 2 seconds. `just accept` under 15 seconds.
 
 ---
 
