@@ -1,0 +1,10 @@
+target/
+.git/
+.github/
+.worktrees/
+.fdb/
+docs/
+fuzz/artifacts/
+fuzz/corpus/
+**/mutants.out*/
+*.md
