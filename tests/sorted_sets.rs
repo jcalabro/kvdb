@@ -1317,3 +1317,215 @@ async fn zrangebylex_limit() {
         .unwrap();
     assert_eq!(members, vec!["b", "c"]); // Skip 1, take 2.
 }
+
+// ---------------------------------------------------------------------------
+// ZREMRANGEBYRANK
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn zremrangebyrank_basic() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("a")
+        .arg(2.0)
+        .arg("b")
+        .arg(3.0)
+        .arg("c")
+        .arg(4.0)
+        .arg("d")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // Remove middle 2 (ranks 1 and 2: b, c).
+    let removed: i64 = redis::cmd("ZREMRANGEBYRANK")
+        .arg("myzset")
+        .arg(1)
+        .arg(2)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(removed, 2);
+
+    let remaining: Vec<String> = redis::cmd("ZRANGE")
+        .arg("myzset")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(remaining, vec!["a", "d"]);
+}
+
+#[tokio::test]
+async fn zremrangebyrank_all() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("a")
+        .arg(2.0)
+        .arg("b")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let removed: i64 = redis::cmd("ZREMRANGEBYRANK")
+        .arg("myzset")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(removed, 2);
+
+    // Key should be deleted.
+    let key_type: String = redis::cmd("TYPE").arg("myzset").query_async(&mut con).await.unwrap();
+    assert_eq!(key_type, "none");
+}
+
+// ---------------------------------------------------------------------------
+// ZREMRANGEBYSCORE
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn zremrangebyscore_basic() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("a")
+        .arg(2.0)
+        .arg("b")
+        .arg(3.0)
+        .arg("c")
+        .arg(4.0)
+        .arg("d")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let removed: i64 = redis::cmd("ZREMRANGEBYSCORE")
+        .arg("myzset")
+        .arg(2)
+        .arg(3)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(removed, 2);
+
+    let remaining: Vec<String> = redis::cmd("ZRANGE")
+        .arg("myzset")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(remaining, vec!["a", "d"]);
+}
+
+#[tokio::test]
+async fn zremrangebyscore_exclusive() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("a")
+        .arg(2.0)
+        .arg("b")
+        .arg(3.0)
+        .arg("c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let removed: i64 = redis::cmd("ZREMRANGEBYSCORE")
+        .arg("myzset")
+        .arg("(1")
+        .arg("(3")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(removed, 1); // Only score 2.
+}
+
+#[tokio::test]
+async fn zremrangebyscore_inf() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("a")
+        .arg(2.0)
+        .arg("b")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let removed: i64 = redis::cmd("ZREMRANGEBYSCORE")
+        .arg("myzset")
+        .arg("-inf")
+        .arg("+inf")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(removed, 2);
+
+    let key_type: String = redis::cmd("TYPE").arg("myzset").query_async(&mut con).await.unwrap();
+    assert_eq!(key_type, "none");
+}
+
+// ---------------------------------------------------------------------------
+// ZREMRANGEBYLEX
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn zremrangebylex_basic() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // All same score for meaningful lex ordering.
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(0.0)
+        .arg("a")
+        .arg(0.0)
+        .arg("b")
+        .arg(0.0)
+        .arg("c")
+        .arg(0.0)
+        .arg("d")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let removed: i64 = redis::cmd("ZREMRANGEBYLEX")
+        .arg("myzset")
+        .arg("[b")
+        .arg("[c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(removed, 2); // b, c removed.
+
+    let remaining: Vec<String> = redis::cmd("ZRANGE")
+        .arg("myzset")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(remaining, vec!["a", "d"]);
+}

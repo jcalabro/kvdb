@@ -1262,6 +1262,208 @@ pub async fn handle_zrangebylex(args: &[Bytes], state: &ConnectionState) -> Resp
 }
 
 // ---------------------------------------------------------------------------
+// ZREMRANGEBYRANK key start stop
+// ---------------------------------------------------------------------------
+
+/// ZREMRANGEBYRANK key start stop — Remove members by rank range.
+///
+/// Returns the number of members removed. Supports negative indices.
+pub async fn handle_zremrangebyrank(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.len() != 3 {
+        return RespValue::err(
+            CommandError::WrongArity {
+                name: "ZREMRANGEBYRANK".into(),
+            }
+            .to_string(),
+        );
+    }
+
+    let start = match std::str::from_utf8(&args[1]).ok().and_then(|s| s.parse::<i64>().ok()) {
+        Some(v) => v,
+        None => return RespValue::err("ERR value is not an integer or out of range"),
+    };
+    let stop = match std::str::from_utf8(&args[2]).ok().and_then(|s| s.parse::<i64>().ok()) {
+        Some(v) => v,
+        None => return RespValue::err("ERR value is not an integer or out of range"),
+    };
+
+    match run_transact(&state.db, "ZREMRANGEBYRANK", |tr| {
+        let dirs = state.dirs.clone();
+        let key = args[0].clone();
+        async move {
+            let (live_meta, old_cardinality, _) = read_zset_meta_for_write(&tr, &dirs, &key).await?;
+            if live_meta.is_none() {
+                return Ok(0i64);
+            }
+
+            let members = read_zset_members_by_score(&tr, &dirs, &key, false)
+                .await
+                .map_err(helpers::cmd_err)?;
+
+            let len = members.len() as i64;
+
+            // Normalize negative indices.
+            let norm_start = if start < 0 {
+                (len + start).max(0)
+            } else {
+                start.min(len)
+            };
+            let norm_stop = if stop < 0 {
+                (len + stop).max(-1)
+            } else {
+                stop.min(len - 1)
+            };
+
+            if norm_start > norm_stop || norm_start >= len {
+                return Ok(0i64);
+            }
+
+            let to_remove = &members[norm_start as usize..=norm_stop as usize];
+            let removed = to_remove.len() as i64;
+
+            for (score, member) in to_remove {
+                zset_remove_member(&tr, &dirs, &key, member, *score);
+            }
+
+            let new_cardinality = (old_cardinality as i64 - removed) as u64;
+            write_or_delete_zset_meta(&tr, &dirs, &key, live_meta.as_ref(), new_cardinality)?;
+
+            Ok(removed)
+        }
+    })
+    .await
+    {
+        Ok(count) => RespValue::Integer(count),
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ZREMRANGEBYSCORE key min max
+// ---------------------------------------------------------------------------
+
+/// ZREMRANGEBYSCORE key min max — Remove members by score range.
+///
+/// Returns the number of members removed. Uses score bound syntax.
+pub async fn handle_zremrangebyscore(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.len() != 3 {
+        return RespValue::err(
+            CommandError::WrongArity {
+                name: "ZREMRANGEBYSCORE".into(),
+            }
+            .to_string(),
+        );
+    }
+
+    let min = match parse_score_bound(&args[1]) {
+        Ok(v) => v,
+        Err(e) => return RespValue::err(e.to_string()),
+    };
+    let max = match parse_score_bound(&args[2]) {
+        Ok(v) => v,
+        Err(e) => return RespValue::err(e.to_string()),
+    };
+
+    match run_transact(&state.db, "ZREMRANGEBYSCORE", |tr| {
+        let dirs = state.dirs.clone();
+        let key = args[0].clone();
+        let min = min.clone();
+        let max = max.clone();
+        async move {
+            let (live_meta, old_cardinality, _) = read_zset_meta_for_write(&tr, &dirs, &key).await?;
+            if live_meta.is_none() {
+                return Ok(0i64);
+            }
+
+            let members = read_zset_members_by_score(&tr, &dirs, &key, false)
+                .await
+                .map_err(helpers::cmd_err)?;
+
+            let to_remove: Vec<_> = members.iter().filter(|(s, _)| score_in_range(*s, &min, &max)).collect();
+            let removed = to_remove.len() as i64;
+
+            for (score, member) in &to_remove {
+                zset_remove_member(&tr, &dirs, &key, member, *score);
+            }
+
+            let new_cardinality = (old_cardinality as i64 - removed) as u64;
+            write_or_delete_zset_meta(&tr, &dirs, &key, live_meta.as_ref(), new_cardinality)?;
+
+            Ok(removed)
+        }
+    })
+    .await
+    {
+        Ok(count) => RespValue::Integer(count),
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ZREMRANGEBYLEX key min max
+// ---------------------------------------------------------------------------
+
+/// ZREMRANGEBYLEX key min max — Remove members by lex range.
+///
+/// Returns the number of members removed. Uses lex bound syntax.
+pub async fn handle_zremrangebylex(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.len() != 3 {
+        return RespValue::err(
+            CommandError::WrongArity {
+                name: "ZREMRANGEBYLEX".into(),
+            }
+            .to_string(),
+        );
+    }
+
+    let min = match parse_lex_bound(&args[1]) {
+        Ok(v) => v,
+        Err(e) => return RespValue::err(e.to_string()),
+    };
+    let max = match parse_lex_bound(&args[2]) {
+        Ok(v) => v,
+        Err(e) => return RespValue::err(e.to_string()),
+    };
+
+    match run_transact(&state.db, "ZREMRANGEBYLEX", |tr| {
+        let dirs = state.dirs.clone();
+        let key = args[0].clone();
+        let min = min.clone();
+        let max = max.clone();
+        async move {
+            let (live_meta, old_cardinality, _) = read_zset_meta_for_write(&tr, &dirs, &key).await?;
+            if live_meta.is_none() {
+                return Ok(0i64);
+            }
+
+            let members = read_zset_members_by_score(&tr, &dirs, &key, false)
+                .await
+                .map_err(helpers::cmd_err)?;
+
+            let to_remove: Vec<_> = members
+                .iter()
+                .filter(|(_, m)| member_in_lex_range(m.as_slice(), &min, &max))
+                .collect();
+            let removed = to_remove.len() as i64;
+
+            for (score, member) in &to_remove {
+                zset_remove_member(&tr, &dirs, &key, member, *score);
+            }
+
+            let new_cardinality = (old_cardinality as i64 - removed) as u64;
+            write_or_delete_zset_meta(&tr, &dirs, &key, live_meta.as_ref(), new_cardinality)?;
+
+            Ok(removed)
+        }
+    })
+    .await
+    {
+        Ok(count) => RespValue::Integer(count),
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
