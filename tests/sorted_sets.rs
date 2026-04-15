@@ -1,5 +1,10 @@
 // tests/sorted_sets.rs
-//! Integration tests for sorted set commands: ZADD, ZCARD, ZSCORE, ZREM.
+//! Integration tests for sorted set commands.
+//!
+//! Covers: ZADD (NX/XX/GT/LT/CH), ZREM, ZSCORE, ZRANK, ZREVRANK, ZCARD,
+//! ZCOUNT, ZLEXCOUNT, ZINCRBY, ZRANGE, ZREVRANGE, ZRANGEBYSCORE, ZRANGEBYLEX,
+//! ZREMRANGEBYRANK, ZREMRANGEBYSCORE, ZREMRANGEBYLEX, ZPOPMIN, ZPOPMAX,
+//! ZRANDMEMBER, ZMSCORE.
 //!
 //! Tests the full path: TCP connect -> RESP -> dispatch -> FDB -> response.
 
@@ -1786,4 +1791,277 @@ async fn zmscore_nonexistent_key() {
     assert_eq!(scores.len(), 2);
     assert_eq!(scores[0], None);
     assert_eq!(scores[1], None);
+}
+
+// ---------------------------------------------------------------------------
+// ZADD LT flag
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn zadd_lt_flag() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(10.0)
+        .arg("alice")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // LT: only update if new score < old score. 20 > 10, should NOT update.
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg("LT")
+        .arg(20.0)
+        .arg("alice")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let score: f64 = redis::cmd("ZSCORE")
+        .arg("myzset")
+        .arg("alice")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert!((score - 10.0).abs() < f64::EPSILON); // Unchanged.
+
+    // LT: 5 < 10, should update.
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg("LT")
+        .arg(5.0)
+        .arg("alice")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let score: f64 = redis::cmd("ZSCORE")
+        .arg("myzset")
+        .arg("alice")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert!((score - 5.0).abs() < f64::EPSILON); // Updated.
+
+    // LT still allows new members to be added.
+    let added: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg("LT")
+        .arg(99.0)
+        .arg("bob")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(added, 1);
+}
+
+// ---------------------------------------------------------------------------
+// ZADD flag mutual exclusion errors
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn zadd_flag_nx_xx_mutual_exclusion() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // NX + XX should be rejected.
+    let err = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg("NX")
+        .arg("XX")
+        .arg(1.0)
+        .arg("alice")
+        .query_async::<i64>(&mut con)
+        .await
+        .unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("XX and NX"),
+        "expected NX/XX incompatibility error, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn zadd_flag_nx_gt_mutual_exclusion() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // NX + GT should be rejected.
+    let err = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg("NX")
+        .arg("GT")
+        .arg(1.0)
+        .arg("alice")
+        .query_async::<i64>(&mut con)
+        .await
+        .unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("GT, LT, and NX"),
+        "expected NX/GT incompatibility error, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn zadd_flag_nx_lt_mutual_exclusion() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // NX + LT should be rejected.
+    let err = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg("NX")
+        .arg("LT")
+        .arg(1.0)
+        .arg("alice")
+        .query_async::<i64>(&mut con)
+        .await
+        .unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("GT, LT, and NX"),
+        "expected NX/LT incompatibility error, got: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ZADD with duplicate members in a single call
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn zadd_duplicate_members_in_single_call() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // Redis processes left-to-right: first pair adds alice at 1, second
+    // pair updates alice to 5. Only 1 member added total.
+    let added: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("alice")
+        .arg(5.0)
+        .arg("alice")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(added, 1);
+
+    // Score should be the last value (5.0).
+    let score: f64 = redis::cmd("ZSCORE")
+        .arg("myzset")
+        .arg("alice")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert!((score - 5.0).abs() < f64::EPSILON);
+
+    // Cardinality should be 1, not 2.
+    let card: i64 = redis::cmd("ZCARD").arg("myzset").query_async(&mut con).await.unwrap();
+    assert_eq!(card, 1);
+}
+
+// ---------------------------------------------------------------------------
+// ZINCRBY inf + -inf = NaN rejection
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn zincrby_nan_result_rejected() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // Set score to +inf.
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg("inf")
+        .arg("alice")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // Incrementing by -inf should produce NaN and be rejected.
+    let err = redis::cmd("ZINCRBY")
+        .arg("myzset")
+        .arg("-inf")
+        .arg("alice")
+        .query_async::<String>(&mut con)
+        .await
+        .unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("NaN"), "expected NaN error, got: {msg}");
+
+    // Score should be unchanged (still inf).
+    let score: String = redis::cmd("ZSCORE")
+        .arg("myzset")
+        .arg("alice")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(score, "inf");
+}
+
+// ---------------------------------------------------------------------------
+// ZRANDMEMBER WITHSCORES
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn zrandmember_positive_count_withscores() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("a")
+        .arg(2.0)
+        .arg("b")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // Positive count + WITHSCORES: returns up to count distinct members with scores.
+    let result: Vec<String> = redis::cmd("ZRANDMEMBER")
+        .arg("myzset")
+        .arg(10)
+        .arg("WITHSCORES")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    // Should be 4 elements: 2 members * (member + score).
+    assert_eq!(result.len(), 4);
+    // Verify that scores are present (every odd index is a parseable number).
+    assert!(result[1].parse::<f64>().is_ok());
+    assert!(result[3].parse::<f64>().is_ok());
+}
+
+#[tokio::test]
+async fn zrandmember_negative_count_withscores() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("a")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // Negative count + WITHSCORES: returns |count| entries, may repeat.
+    let result: Vec<String> = redis::cmd("ZRANDMEMBER")
+        .arg("myzset")
+        .arg(-3)
+        .arg("WITHSCORES")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    // 3 entries, each with score: 6 total elements.
+    assert_eq!(result.len(), 6);
+    for i in (0..6).step_by(2) {
+        assert_eq!(result[i], "a");
+        assert_eq!(result[i + 1], "1");
+    }
 }

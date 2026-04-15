@@ -1952,6 +1952,87 @@ async fn run_validate(addr: &str) -> bool {
     let result: redis::RedisResult<i64> = redis::cmd("ZCARD").arg("smoke_zset_rbs").query_async(&mut con).await;
     t.check_eq("ZCARD after ZREMRANGEBYSCORE", result, 2);
 
+    // ZRANGEBYLEX: create a lex set (same score), query a range
+    let _: redis::RedisResult<i64> = redis::cmd("ZADD")
+        .arg("smoke_zset_lex")
+        .arg("0")
+        .arg("a")
+        .arg("0")
+        .arg("b")
+        .arg("0")
+        .arg("c")
+        .arg("0")
+        .arg("d")
+        .arg("0")
+        .arg("e")
+        .query_async(&mut con)
+        .await;
+    let result: redis::RedisResult<Vec<String>> = redis::cmd("ZRANGEBYLEX")
+        .arg("smoke_zset_lex")
+        .arg("[b")
+        .arg("[d")
+        .query_async(&mut con)
+        .await;
+    t.check_eq(
+        "ZRANGEBYLEX [b [d",
+        result,
+        vec!["b".to_string(), "c".into(), "d".into()],
+    );
+
+    // ZLEXCOUNT
+    let result: redis::RedisResult<i64> = redis::cmd("ZLEXCOUNT")
+        .arg("smoke_zset_lex")
+        .arg("-")
+        .arg("+")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("ZLEXCOUNT - +", result, 5);
+
+    // ZREMRANGEBYLEX: remove [b, [c] from the lex set
+    let result: redis::RedisResult<i64> = redis::cmd("ZREMRANGEBYLEX")
+        .arg("smoke_zset_lex")
+        .arg("[b")
+        .arg("[c")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("ZREMRANGEBYLEX [b [c", result, 2);
+
+    let result: redis::RedisResult<i64> = redis::cmd("ZCARD").arg("smoke_zset_lex").query_async(&mut con).await;
+    t.check_eq("ZCARD after ZREMRANGEBYLEX", result, 3);
+
+    // ZREMRANGEBYRANK: create a set, remove middle elements by rank
+    let _: redis::RedisResult<i64> = redis::cmd("ZADD")
+        .arg("smoke_zset_rbr")
+        .arg("1")
+        .arg("a")
+        .arg("2")
+        .arg("b")
+        .arg("3")
+        .arg("c")
+        .arg("4")
+        .arg("d")
+        .query_async(&mut con)
+        .await;
+    let result: redis::RedisResult<i64> = redis::cmd("ZREMRANGEBYRANK")
+        .arg("smoke_zset_rbr")
+        .arg("1")
+        .arg("2")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("ZREMRANGEBYRANK 1 2", result, 2);
+
+    let result: redis::RedisResult<Vec<String>> = redis::cmd("ZRANGE")
+        .arg("smoke_zset_rbr")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await;
+    t.check_eq(
+        "ZRANGE after ZREMRANGEBYRANK",
+        result,
+        vec!["a".to_string(), "d".into()],
+    );
+
     // ZMSCORE with mix of existing and non-existing members
     // smoke_zset still has c(3) and d(4) after the pops above
     let result: redis::RedisResult<Vec<redis::Value>> = redis::cmd("ZMSCORE")
@@ -2020,6 +2101,8 @@ async fn run_validate(addr: &str) -> bool {
         .arg("smoke_zset")
         .arg("smoke_zset_rem")
         .arg("smoke_zset_rbs")
+        .arg("smoke_zset_lex")
+        .arg("smoke_zset_rbr")
         .arg("smoke_zset_rand")
         .arg("smoke_str_for_zset")
         .query_async(&mut con)

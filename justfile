@@ -19,7 +19,7 @@ accept:
     cargo nextest run --no-tests=pass -E 'binary(accept_protocol) or test(accept)'
 
 # Full CI pipeline — lint, all tests, doc build. Run before pushing.
-ci: lint test accept
+ci: lint test accept smoke
     cargo doc --no-deps
 
 # Run clippy and format check

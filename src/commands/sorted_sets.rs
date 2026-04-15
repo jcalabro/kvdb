@@ -30,7 +30,6 @@ use crate::storage::run_transact;
 
 /// A bound for score-based range queries (ZRANGEBYSCORE, ZCOUNT, etc.).
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
 pub(crate) enum ScoreBound {
     NegInf,
     PosInf,
@@ -40,7 +39,6 @@ pub(crate) enum ScoreBound {
 
 /// A bound for lexicographic range queries (ZRANGEBYLEX, ZLEXCOUNT, etc.).
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
 pub(crate) enum LexBound {
     NegInf,
     PosInf,
@@ -53,7 +51,6 @@ pub(crate) enum LexBound {
 /// - `-inf`, `+inf`, `inf` (case insensitive) → NegInf / PosInf
 /// - `(1.5` → Exclusive(1.5)
 /// - `1.5` → Inclusive(1.5)
-#[allow(dead_code)]
 pub(crate) fn parse_score_bound(arg: &[u8]) -> Result<ScoreBound, CommandError> {
     let s = std::str::from_utf8(arg).map_err(|_| CommandError::Generic("invalid score bound".into()))?;
 
@@ -83,7 +80,6 @@ pub(crate) fn parse_score_bound(arg: &[u8]) -> Result<ScoreBound, CommandError> 
 /// - `+` → PosInf
 /// - `[value` → Inclusive(value)
 /// - `(value` → Exclusive(value)
-#[allow(dead_code)]
 pub(crate) fn parse_lex_bound(arg: &[u8]) -> Result<LexBound, CommandError> {
     if arg.is_empty() {
         return Err(CommandError::Generic(
@@ -113,7 +109,6 @@ pub(crate) fn parse_lex_bound(arg: &[u8]) -> Result<LexBound, CommandError> {
 // ---------------------------------------------------------------------------
 
 /// Returns `true` if `score >= bound` (inclusive) or `score > bound` (exclusive).
-#[allow(dead_code)]
 pub(crate) fn score_gte_bound(score: f64, bound: &ScoreBound) -> bool {
     match bound {
         ScoreBound::NegInf => true,
@@ -124,7 +119,6 @@ pub(crate) fn score_gte_bound(score: f64, bound: &ScoreBound) -> bool {
 }
 
 /// Returns `true` if `score <= bound` (inclusive) or `score < bound` (exclusive).
-#[allow(dead_code)]
 pub(crate) fn score_lte_bound(score: f64, bound: &ScoreBound) -> bool {
     match bound {
         ScoreBound::NegInf => false,
@@ -135,13 +129,11 @@ pub(crate) fn score_lte_bound(score: f64, bound: &ScoreBound) -> bool {
 }
 
 /// Returns `true` if `score` is within the range `[min, max]`.
-#[allow(dead_code)]
 pub(crate) fn score_in_range(score: f64, min: &ScoreBound, max: &ScoreBound) -> bool {
     score_gte_bound(score, min) && score_lte_bound(score, max)
 }
 
 /// Returns `true` if `member >= bound` (inclusive) or `member > bound` (exclusive).
-#[allow(dead_code)]
 pub(crate) fn member_gte_lex_bound(member: &[u8], bound: &LexBound) -> bool {
     match bound {
         LexBound::NegInf => true,
@@ -152,7 +144,6 @@ pub(crate) fn member_gte_lex_bound(member: &[u8], bound: &LexBound) -> bool {
 }
 
 /// Returns `true` if `member <= bound` (inclusive) or `member < bound` (exclusive).
-#[allow(dead_code)]
 pub(crate) fn member_lte_lex_bound(member: &[u8], bound: &LexBound) -> bool {
     match bound {
         LexBound::NegInf => false,
@@ -163,7 +154,6 @@ pub(crate) fn member_lte_lex_bound(member: &[u8], bound: &LexBound) -> bool {
 }
 
 /// Returns `true` if `member` is within the lex range `[min, max]`.
-#[allow(dead_code)]
 pub(crate) fn member_in_lex_range(member: &[u8], min: &LexBound, max: &LexBound) -> bool {
     member_gte_lex_bound(member, min) && member_lte_lex_bound(member, max)
 }
@@ -201,6 +191,13 @@ pub(crate) fn parse_score_arg(arg: &[u8]) -> Result<f64, CommandError> {
 
     if val.is_nan() {
         return Err(CommandError::Generic("ERR value is not a valid float".into()));
+    }
+
+    // Normalize -0.0 to 0.0. Redis treats negative zero identically to
+    // positive zero, but FDB's tuple layer encodes them differently which
+    // would cause incorrect sort ordering in the score index.
+    if val == 0.0 {
+        return Ok(0.0);
     }
 
     Ok(val)
@@ -381,7 +378,6 @@ pub(crate) async fn zset_get_score(
 ///
 /// Returns `Vec<(score, member)>` ordered by (score, member).
 /// Uses the `zset/<key, score, member>` index for natural ordering.
-#[allow(dead_code)]
 pub(crate) async fn read_zset_members_by_score(
     tr: &Transaction,
     dirs: &Directories,
@@ -1038,9 +1034,34 @@ pub async fn handle_zlexcount(args: &[Bytes], state: &ConnectionState) -> RespVa
 // ZRANGEBYSCORE key min max [WITHSCORES] [LIMIT offset count]
 // ---------------------------------------------------------------------------
 
+/// Parse a LIMIT clause at position `i` within `args`.
+///
+/// Expects `args[i]` to be "LIMIT", followed by offset and count integers.
+/// Returns `(offset, count, next_index)`. Negative count means "all remaining"
+/// per Redis behavior.
+fn parse_limit_clause(args: &[Bytes], i: usize) -> Result<(usize, usize, usize), CommandError> {
+    if i + 2 >= args.len() {
+        return Err(CommandError::Generic("ERR syntax error".into()));
+    }
+    let off_str = std::str::from_utf8(&args[i + 1])
+        .map_err(|_| CommandError::Generic("ERR value is not an integer or out of range".into()))?;
+    let cnt_str = std::str::from_utf8(&args[i + 2])
+        .map_err(|_| CommandError::Generic("ERR value is not an integer or out of range".into()))?;
+    let offset = off_str
+        .parse::<i64>()
+        .map_err(|_| CommandError::Generic("ERR value is not an integer or out of range".into()))?
+        as usize;
+    let raw_count = cnt_str
+        .parse::<i64>()
+        .map_err(|_| CommandError::Generic("ERR value is not an integer or out of range".into()))?;
+    // Negative count means "all remaining" per Redis behavior.
+    let count = if raw_count < 0 { usize::MAX } else { raw_count as usize };
+    Ok((offset, count, i + 3))
+}
+
 /// Parse optional WITHSCORES and LIMIT flags from trailing arguments.
 ///
-/// Returns `(withscores, offset, count)` where offset/count default to 0/i64::MAX
+/// Returns `(withscores, offset, count)` where offset/count default to 0/usize::MAX
 /// (meaning "no limit").
 fn parse_range_options(args: &[Bytes], start_idx: usize) -> Result<(bool, usize, usize), CommandError> {
     let mut withscores = false;
@@ -1056,23 +1077,7 @@ fn parse_range_options(args: &[Bytes], start_idx: usize) -> Result<(bool, usize,
                 i += 1;
             }
             b"LIMIT" => {
-                if i + 2 >= args.len() {
-                    return Err(CommandError::Generic("ERR syntax error".into()));
-                }
-                let off_str = std::str::from_utf8(&args[i + 1])
-                    .map_err(|_| CommandError::Generic("ERR value is not an integer or out of range".into()))?;
-                let cnt_str = std::str::from_utf8(&args[i + 2])
-                    .map_err(|_| CommandError::Generic("ERR value is not an integer or out of range".into()))?;
-                offset = off_str
-                    .parse::<i64>()
-                    .map_err(|_| CommandError::Generic("ERR value is not an integer or out of range".into()))?
-                    as usize;
-                let raw_count = cnt_str
-                    .parse::<i64>()
-                    .map_err(|_| CommandError::Generic("ERR value is not an integer or out of range".into()))?;
-                // Negative count means "all remaining" per Redis behavior.
-                count = if raw_count < 0 { usize::MAX } else { raw_count as usize };
-                i += 3;
+                (offset, count, i) = parse_limit_clause(args, i)?;
             }
             _ => {
                 return Err(CommandError::Generic("ERR syntax error".into()));
@@ -1095,22 +1100,7 @@ fn parse_limit_only(args: &[Bytes], start_idx: usize) -> Result<(usize, usize), 
         let upper = args[i].to_ascii_uppercase();
         match upper.as_slice() {
             b"LIMIT" => {
-                if i + 2 >= args.len() {
-                    return Err(CommandError::Generic("ERR syntax error".into()));
-                }
-                let off_str = std::str::from_utf8(&args[i + 1])
-                    .map_err(|_| CommandError::Generic("ERR value is not an integer or out of range".into()))?;
-                let cnt_str = std::str::from_utf8(&args[i + 2])
-                    .map_err(|_| CommandError::Generic("ERR value is not an integer or out of range".into()))?;
-                offset = off_str
-                    .parse::<i64>()
-                    .map_err(|_| CommandError::Generic("ERR value is not an integer or out of range".into()))?
-                    as usize;
-                let raw_count = cnt_str
-                    .parse::<i64>()
-                    .map_err(|_| CommandError::Generic("ERR value is not an integer or out of range".into()))?;
-                count = if raw_count < 0 { usize::MAX } else { raw_count as usize };
-                i += 3;
+                (offset, count, i) = parse_limit_clause(args, i)?;
             }
             _ => {
                 return Err(CommandError::Generic("ERR syntax error".into()));
@@ -1981,5 +1971,13 @@ mod tests {
     fn parse_score_arg_rejects_garbage() {
         assert!(parse_score_arg(b"abc").is_err());
         assert!(parse_score_arg(b"").is_err());
+    }
+
+    #[test]
+    fn parse_score_arg_normalizes_negative_zero() {
+        let val = parse_score_arg(b"-0").unwrap();
+        // Must be positive zero (bit pattern), not negative zero.
+        assert_eq!(val.to_bits(), 0.0_f64.to_bits());
+        assert_ne!(val.to_bits(), (-0.0_f64).to_bits());
     }
 }

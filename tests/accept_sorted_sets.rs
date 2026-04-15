@@ -454,4 +454,240 @@ mod accept {
         let msg = format!("{err}");
         assert!(msg.contains("WRONGTYPE"), "expected WRONGTYPE, got: {msg}");
     }
+
+    // -----------------------------------------------------------------------
+    // Property: ZPOPMIN returns scores in non-decreasing order (proptest, 50 cases)
+    // -----------------------------------------------------------------------
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(50))]
+
+        #[test]
+        fn zpopmin_returns_ascending_scores(
+            scores in prop::collection::vec(-1e6f64..1e6f64, 2..30),
+        ) {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let ctx = TestContext::new().await;
+                let mut con = ctx.connection().await;
+
+                let mut cmd = redis::cmd("ZADD");
+                cmd.arg("z");
+                for (i, score) in scores.iter().enumerate() {
+                    cmd.arg(*score).arg(format!("m{i}"));
+                }
+                let _: i64 = cmd.query_async(&mut con).await.unwrap();
+
+                let card: i64 = redis::cmd("ZCARD")
+                    .arg("z")
+                    .query_async(&mut con)
+                    .await
+                    .unwrap();
+
+                // Pop all members one by one and verify non-decreasing scores.
+                let mut prev_score: Option<f64> = None;
+                for _ in 0..card {
+                    let result: Vec<String> = redis::cmd("ZPOPMIN")
+                        .arg("z")
+                        .query_async(&mut con)
+                        .await
+                        .unwrap();
+                    prop_assert!(result.len() == 2, "ZPOPMIN should return [member, score]");
+                    let score: f64 = result[1].parse().unwrap();
+                    if let Some(prev) = prev_score {
+                        prop_assert!(
+                            score >= prev,
+                            "ZPOPMIN scores not non-decreasing: {} after {}",
+                            score, prev
+                        );
+                    }
+                    prev_score = Some(score);
+                }
+
+                // After popping all, set should be empty.
+                let final_card: i64 = redis::cmd("ZCARD")
+                    .arg("z")
+                    .query_async(&mut con)
+                    .await
+                    .unwrap();
+                prop_assert_eq!(final_card, 0);
+
+                Ok(())
+            })?;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property: ZCOUNT == len(ZRANGEBYSCORE) for same bounds (proptest, 50 cases)
+    // -----------------------------------------------------------------------
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(50))]
+
+        #[test]
+        fn zcount_matches_zrangebyscore_len(
+            scores in prop::collection::vec(-1e6f64..1e6f64, 2..30),
+            lo in -1e6f64..1e6f64,
+            hi in -1e6f64..1e6f64,
+        ) {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let ctx = TestContext::new().await;
+                let mut con = ctx.connection().await;
+
+                let mut cmd = redis::cmd("ZADD");
+                cmd.arg("z");
+                for (i, score) in scores.iter().enumerate() {
+                    cmd.arg(*score).arg(format!("m{i}"));
+                }
+                let _: i64 = cmd.query_async(&mut con).await.unwrap();
+
+                // Ensure lo <= hi for meaningful range.
+                let (min, max) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+                let min_str = format!("{min}");
+                let max_str = format!("{max}");
+
+                let count: i64 = redis::cmd("ZCOUNT")
+                    .arg("z")
+                    .arg(&min_str)
+                    .arg(&max_str)
+                    .query_async(&mut con)
+                    .await
+                    .unwrap();
+
+                let members: Vec<String> = redis::cmd("ZRANGEBYSCORE")
+                    .arg("z")
+                    .arg(&min_str)
+                    .arg(&max_str)
+                    .query_async(&mut con)
+                    .await
+                    .unwrap();
+
+                prop_assert_eq!(
+                    count, members.len() as i64,
+                    "ZCOUNT={} but ZRANGEBYSCORE returned {} members for range [{}, {}]",
+                    count, members.len(), min, max
+                );
+
+                Ok(())
+            })?;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property: ZREMRANGEBYRANK preserves cardinality invariant (proptest, 50 cases)
+    // -----------------------------------------------------------------------
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(50))]
+
+        #[test]
+        fn zremrangebyrank_cardinality_invariant(
+            count in 3usize..20,
+            start_pct in 0usize..100,
+            stop_pct in 0usize..100,
+        ) {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let ctx = TestContext::new().await;
+                let mut con = ctx.connection().await;
+
+                // ZADD members with unique scores.
+                let mut cmd = redis::cmd("ZADD");
+                cmd.arg("z");
+                for i in 0..count {
+                    cmd.arg(i as f64).arg(format!("m{i}"));
+                }
+                let added: i64 = cmd.query_async(&mut con).await.unwrap();
+                prop_assert_eq!(added, count as i64);
+
+                // Convert percentages to ranks.
+                let start = (start_pct * count / 100).min(count - 1) as i64;
+                let stop = (stop_pct * count / 100).min(count - 1) as i64;
+
+                let removed: i64 = redis::cmd("ZREMRANGEBYRANK")
+                    .arg("z")
+                    .arg(start)
+                    .arg(stop)
+                    .query_async(&mut con)
+                    .await
+                    .unwrap();
+
+                let remaining: i64 = redis::cmd("ZCARD")
+                    .arg("z")
+                    .query_async(&mut con)
+                    .await
+                    .unwrap();
+
+                prop_assert_eq!(
+                    remaining, count as i64 - removed,
+                    "ZCARD ({}) != initial ({}) - removed ({})",
+                    remaining, count, removed
+                );
+
+                Ok(())
+            })?;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property: ZRANGEBYLEX + ZLEXCOUNT consistency (proptest, 50 cases)
+    // -----------------------------------------------------------------------
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(50))]
+
+        #[test]
+        fn zlexcount_matches_zrangebylex_len(
+            members in prop::collection::vec("[a-z]{1,5}", 2..20),
+        ) {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let ctx = TestContext::new().await;
+                let mut con = ctx.connection().await;
+
+                // All same score for meaningful lex ordering.
+                let mut cmd = redis::cmd("ZADD");
+                cmd.arg("z");
+                for m in &members {
+                    cmd.arg(0.0).arg(m.as_str());
+                }
+                let _: i64 = cmd.query_async(&mut con).await.unwrap();
+
+                // Full lex range.
+                let count: i64 = redis::cmd("ZLEXCOUNT")
+                    .arg("z")
+                    .arg("-")
+                    .arg("+")
+                    .query_async(&mut con)
+                    .await
+                    .unwrap();
+
+                let range_members: Vec<String> = redis::cmd("ZRANGEBYLEX")
+                    .arg("z")
+                    .arg("-")
+                    .arg("+")
+                    .query_async(&mut con)
+                    .await
+                    .unwrap();
+
+                prop_assert_eq!(
+                    count, range_members.len() as i64,
+                    "ZLEXCOUNT={} but ZRANGEBYLEX returned {} members",
+                    count, range_members.len()
+                );
+
+                // Also verify lex ordering.
+                for i in 1..range_members.len() {
+                    prop_assert!(
+                        range_members[i] >= range_members[i - 1],
+                        "ZRANGEBYLEX not sorted: {:?} < {:?}",
+                        range_members[i - 1], range_members[i]
+                    );
+                }
+
+                Ok(())
+            })?;
+        }
+    }
 }
