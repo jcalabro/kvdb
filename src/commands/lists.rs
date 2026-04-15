@@ -42,6 +42,7 @@ use foundationdb::RangeOption;
 use crate::error::CommandError;
 use crate::protocol::types::RespValue;
 use crate::server::connection::ConnectionState;
+use crate::storage::chunking::MAX_VALUE_SIZE;
 use crate::storage::directories::Directories;
 use crate::storage::meta::{KeyType, ObjectMeta};
 use crate::storage::{helpers, run_transact};
@@ -322,6 +323,19 @@ async fn handle_push(
             let key = &args[0];
             let elements = &args[1..];
 
+            // Validate element sizes before any writes. FDB has a hard
+            // 100,000-byte value limit; list elements are stored directly
+            // (not chunked) so we must reject oversized elements upfront.
+            for element in elements {
+                if element.len() > MAX_VALUE_SIZE {
+                    return Err(helpers::cmd_err(CommandError::Generic(format!(
+                        "ERR list element exceeds maximum size ({} bytes > {} byte limit)",
+                        element.len(),
+                        MAX_VALUE_SIZE,
+                    ))));
+                }
+            }
+
             let meta = read_list_meta_for_write(&tr, &dirs, key).await?;
 
             // LPUSHX/RPUSHX: bail out without side effects if the key doesn't exist.
@@ -414,7 +428,9 @@ async fn handle_pop(args: &[Bytes], state: &ConnectionState, op: &'static str, f
         let args = args.to_vec();
         async move {
             let key = &args[0];
-            let meta = read_list_meta_for_read(&tr, &dirs, key).await?;
+            // Use write-path reader: pop mutates the list, and we need to
+            // clean up orphaned data from expired/wrong-type keys.
+            let meta = read_list_meta_for_write(&tr, &dirs, key).await?;
 
             let meta = match meta {
                 None => return Ok(None), // missing key: caller returns Nil or empty array
@@ -657,6 +673,14 @@ pub async fn handle_lset(args: &[Bytes], state: &ConnectionState) -> RespValue {
         async move {
             let key = &args[0];
             let value = &args[2];
+
+            if value.len() > MAX_VALUE_SIZE {
+                return Err(helpers::cmd_err(CommandError::Generic(format!(
+                    "ERR list element exceeds maximum size ({} bytes > {} byte limit)",
+                    value.len(),
+                    MAX_VALUE_SIZE,
+                ))));
+            }
 
             let meta = match read_list_meta_for_read(&tr, &dirs, key).await? {
                 None => return Ok(LsetResult::NoSuchKey),
@@ -920,6 +944,14 @@ pub async fn handle_linsert(args: &[Bytes], state: &ConnectionState) -> RespValu
             let pivot = &args[2];
             let new_elem = &args[3];
 
+            if new_elem.len() > MAX_VALUE_SIZE {
+                return Err(helpers::cmd_err(CommandError::Generic(format!(
+                    "ERR list element exceeds maximum size ({} bytes > {} byte limit)",
+                    new_elem.len(),
+                    MAX_VALUE_SIZE,
+                ))));
+            }
+
             let meta = match read_list_meta_for_read(&tr, &dirs, key).await? {
                 None => return Ok(0i64),
                 Some(m) => m,
@@ -1023,8 +1055,6 @@ pub async fn handle_lpos(args: &[Bytes], state: &ConnectionState) -> RespValue {
                 Some(m) => m,
             };
 
-            let elements = read_element_range(&tr, &dirs, key, meta.list_head, meta.list_tail).await?;
-
             let forward = rank > 0;
             let skip = (rank.unsigned_abs() as usize).saturating_sub(1);
             // count: None = want 1, Some(0) = want all, Some(n>0) = want n.
@@ -1034,31 +1064,52 @@ pub async fn handle_lpos(args: &[Bytes], state: &ConnectionState) -> RespValue {
                 Some(n) => Some(n as usize),
             };
 
+            // Optimization: when MAXLEN is specified, only read the
+            // relevant portion of the list from FDB rather than the
+            // entire thing.
             let scan_len = if maxlen == 0 {
-                elements.len()
+                meta.list_length as usize
             } else {
-                (maxlen as usize).min(elements.len())
+                (maxlen as usize).min(meta.list_length as usize)
             };
+
+            // When scanning forward, read the first `scan_len` elements;
+            // when scanning backward, read the last `scan_len` elements.
+            // We also track the logical offset so returned indices are
+            // still relative to the full list head.
+            let (fdb_start, fdb_end_inclusive, logical_offset) = if forward {
+                let fdb_start = meta.list_head;
+                let fdb_end = meta.list_head + scan_len as i64 - 1;
+                (fdb_start, fdb_end.min(meta.list_tail), 0usize)
+            } else {
+                let fdb_end = meta.list_tail;
+                let fdb_start = meta.list_tail - scan_len as i64 + 1;
+                let offset = (meta.list_length as usize).saturating_sub(scan_len);
+                (fdb_start.max(meta.list_head), fdb_end, offset)
+            };
+
+            let elements = read_element_range(&tr, &dirs, key, fdb_start, fdb_end_inclusive).await?;
 
             let mut matches = Vec::new();
             let mut skipped = 0;
 
             let iter: Box<dyn Iterator<Item = (usize, &Vec<u8>)>> = if forward {
-                Box::new(elements.iter().take(scan_len).enumerate())
+                Box::new(elements.iter().enumerate())
             } else {
-                // Reverse scan: we look at the last `scan_len` elements
-                // going tail-to-head. The returned logical index is the
-                // same (counted from head), regardless of scan direction.
-                Box::new(elements.iter().enumerate().rev().take(scan_len))
+                // Reverse scan: iterate tail-to-head. The logical index
+                // accounts for the offset into the full list.
+                Box::new(elements.iter().enumerate().rev())
             };
 
-            for (logical_idx, elem) in iter {
+            for (local_idx, elem) in iter {
                 if elem.as_slice() == target.as_ref() {
                     if skipped < skip {
                         skipped += 1;
                         continue;
                     }
-                    matches.push(logical_idx as i64);
+                    // Translate the index within our (possibly partial)
+                    // read back to the full-list logical index.
+                    matches.push((local_idx + logical_offset) as i64);
                     if let Some(w) = want
                         && matches.len() >= w
                     {

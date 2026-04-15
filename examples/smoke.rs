@@ -1882,8 +1882,12 @@ impl Stats {
 //   GETDEL        1%    -- atomic get-and-delete
 //   TTL ops       4%    -- TTL management (EXPIRE, TTL, PERSIST, TYPE)
 //   PING          1%    -- health checks
+//   LPUSH/RPUSH   4%    -- list pushes
+//   LPOP/RPOP     3%    -- list pops
+//   LLEN          1%    -- list length
+//   LRANGE        2%    -- list range reads
 //
-// Total = 100%
+// Total = 110 (weights, not strict %; roll range is 0..110)
 
 /// Pick a random operation and execute it. Returns Ok(()) on success,
 /// or an error string for logging (but we mostly just count errors).
@@ -1900,7 +1904,7 @@ async fn run_one_op(
     rng: &mut StdRng,
     key_space: u32,
 ) -> Result<(), String> {
-    let roll: u32 = rng.gen_range(0..100);
+    let roll: u32 = rng.gen_range(0..110);
 
     // String-value keys (SET/GET/MGET/MSET/SETNX/SETEX/PSETEX/GETDEL/DEL/EXISTS)
     let str_key = format!("lg:s:{}", rng.gen_range(0..key_space));
@@ -1910,6 +1914,8 @@ async fn run_one_op(
     let flt_key = format!("lg:f:{}", rng.gen_range(0..key_space / 4));
     // Append-only keys (APPEND/STRLEN/GETRANGE/SETRANGE) -- always text
     let app_key = format!("lg:a:{}", rng.gen_range(0..key_space));
+    // List keys (LPUSH/RPUSH/LPOP/RPOP/LLEN/LRANGE)
+    let list_key = format!("lg:l:{}", rng.gen_range(0..key_space / 4));
 
     match roll {
         // ----- GET (31%) -----
@@ -2171,6 +2177,50 @@ async fn run_one_op(
         // ----- PING (1%) -----
         99 => redis::cmd("PING")
             .query_async::<String>(con)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+
+        // ----- LPUSH / RPUSH (4%) -----
+        100..=103 => {
+            let value = random_value(rng);
+            // Clamp to FDB value limit (list elements are not chunked).
+            let value = if value.len() > 99_000 { &value[..99_000] } else { &value };
+            let cmd_name = if rng.gen_bool(0.5) { "LPUSH" } else { "RPUSH" };
+            redis::cmd(cmd_name)
+                .arg(&list_key)
+                .arg(value)
+                .query_async::<i64>(con)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+
+        // ----- LPOP / RPOP (3%) -----
+        104..=106 => {
+            let cmd_name = if rng.gen_bool(0.5) { "LPOP" } else { "RPOP" };
+            redis::cmd(cmd_name)
+                .arg(&list_key)
+                .query_async::<redis::Value>(con)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+
+        // ----- LLEN (1%) -----
+        107 => redis::cmd("LLEN")
+            .arg(&list_key)
+            .query_async::<i64>(con)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+
+        // ----- LRANGE (2%) -----
+        108..=109 => redis::cmd("LRANGE")
+            .arg(&list_key)
+            .arg(0)
+            .arg(-1)
+            .query_async::<Vec<String>>(con)
             .await
             .map(|_| ())
             .map_err(|e| e.to_string()),

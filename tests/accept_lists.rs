@@ -485,4 +485,146 @@ mod accept {
             })?;
         }
     }
+
+    // -----------------------------------------------------------------------
+    // TTL: list with EXPIRE is cleaned up by background worker
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn list_lazy_expiry() {
+        let ctx = TestContext::new().await;
+        let mut con = ctx.connection().await;
+
+        // Create a list with a very short TTL.
+        let _: i64 = redis::cmd("RPUSH")
+            .arg("expiring_list")
+            .arg("a")
+            .arg("b")
+            .arg("c")
+            .query_async(&mut con)
+            .await
+            .unwrap();
+
+        let _: i64 = redis::cmd("PEXPIRE")
+            .arg("expiring_list")
+            .arg(200)
+            .query_async(&mut con)
+            .await
+            .unwrap();
+
+        // Before expiry: list is accessible.
+        let llen: i64 = redis::cmd("LLEN")
+            .arg("expiring_list")
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        assert_eq!(llen, 3);
+
+        // Wait for expiry (200ms TTL + 250ms background scan + margin).
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+
+        // After expiry: key should be gone (lazy or active expiry).
+        let llen: i64 = redis::cmd("LLEN")
+            .arg("expiring_list")
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        assert_eq!(llen, 0);
+
+        let exists: i64 = redis::cmd("EXISTS")
+            .arg("expiring_list")
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        assert_eq!(exists, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // LPUSH on an expired key of a different type creates a new list
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn lpush_on_expired_string_creates_new_list() {
+        let ctx = TestContext::new().await;
+        let mut con = ctx.connection().await;
+
+        // Create a string with a very short TTL.
+        let _: () = redis::cmd("SET")
+            .arg("morph")
+            .arg("string_value")
+            .arg("PX")
+            .arg(200)
+            .query_async(&mut con)
+            .await
+            .unwrap();
+
+        // Wait for the string to expire.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        // LPUSH should succeed — the expired string should be cleaned up
+        // and a new list created.
+        let len: i64 = redis::cmd("LPUSH")
+            .arg("morph")
+            .arg("list_elem")
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        assert_eq!(len, 1);
+
+        let t: String = redis::cmd("TYPE").arg("morph").query_async(&mut con).await.unwrap();
+        assert_eq!(t, "list");
+
+        let got: Vec<String> = redis::cmd("LRANGE")
+            .arg("morph")
+            .arg(0)
+            .arg(-1)
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        assert_eq!(got, vec!["list_elem"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // WRONGTYPE: list commands on hash keys and vice versa
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn wrongtype_list_vs_hash() {
+        let ctx = TestContext::new().await;
+        let mut con = ctx.connection().await;
+
+        // Create a hash.
+        let _: i64 = redis::cmd("HSET")
+            .arg("myhash")
+            .arg("f1")
+            .arg("v1")
+            .query_async(&mut con)
+            .await
+            .unwrap();
+
+        // List commands on a hash should fail with WRONGTYPE.
+        let result: redis::RedisResult<i64> = redis::cmd("LPUSH").arg("myhash").arg("x").query_async(&mut con).await;
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("WRONGTYPE"), "expected WRONGTYPE, got: {err}");
+
+        // Create a list.
+        let _: i64 = redis::cmd("RPUSH")
+            .arg("mylist")
+            .arg("a")
+            .query_async(&mut con)
+            .await
+            .unwrap();
+
+        // Hash commands on a list should fail with WRONGTYPE.
+        let result: redis::RedisResult<i64> = redis::cmd("HSET")
+            .arg("mylist")
+            .arg("f1")
+            .arg("v1")
+            .query_async(&mut con)
+            .await;
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("WRONGTYPE"), "expected WRONGTYPE, got: {err}");
+    }
 }

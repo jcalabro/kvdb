@@ -12,8 +12,9 @@
 | M5: Key Management & TTL | **Complete** | 18 commands (EXPIRE, PEXPIRE, EXPIREAT, PEXPIREAT, TTL, PTTL, PERSIST, EXPIRETIME, PEXPIRETIME, TYPE, RENAME, RENAMENX, UNLINK, TOUCH, DBSIZE, SELECT, FLUSHDB, FLUSHALL). Background expiry worker (250ms scan, 1000 key batches). NamespaceCache for SELECT. 40 integration tests, 14 acceptance tests. |
 | M6: Hash Commands | **Complete** | 15 commands (HSET, HGET, HDEL, HEXISTS, HLEN, HKEYS, HVALS, HGETALL, HMGET, HMSET, HINCRBY, HINCRBYFLOAT, HSETNX, HSTRLEN, HRANDFIELD). FDB range reads for HGETALL/HKEYS/HVALS. Cardinality tracking via ObjectMeta. 30 integration tests, 9 acceptance tests (property-based + randomized 500-op model checking). |
 | M7: Set Commands | **Complete** | 16 commands (SADD, SREM, SISMEMBER, SMISMEMBER, SCARD, SMEMBERS, SPOP, SRANDMEMBER, SMOVE, SINTER, SUNION, SDIFF, SINTERSTORE, SUNIONSTORE, SDIFFSTORE, SINTERCARD). Direct FDB keys (existence = membership). Parallel existence checks via join_all. Multi-set ops computed in-memory. 37 integration tests, 9 acceptance tests (property-based + randomized model checking). |
-| M8: Sorted Set Commands | Not started | |
-| M9: List Commands | Not started | |
+| M8: List Commands | **Complete** | 14 commands (LPUSH, RPUSH, LPOP, RPOP, LLEN, LINDEX, LRANGE, LSET, LTRIM, LREM, LPUSHX, RPUSHX, LINSERT, LPOS). Index-based storage (O(1) push/pop/LINDEX, O(k) LRANGE). Compact-rewrite for LREM/LINSERT. Element size validation (100KB FDB limit). 37 integration tests, 10 acceptance tests (property-based VecDeque model + TTL + WRONGTYPE). 392 total tests, `just test` at ~2s, `just accept` at ~16s. |
+| M9: Sorted Set Commands | Not started | Moved from M8; lists promoted to M8 for implementation-order reasons. |
+| M9.5: Cross-Key List Commands | Not started | LMOVE, LMPOP. |
 | M10: Transactions | Not started | |
 | M11: Pub/Sub | Not started | |
 | M12: Server Commands & Observability | Not started | |
@@ -174,6 +175,30 @@ Set members are stored as individual FDB keys with empty values: `set/<redis_key
 **Smoke tests** (`examples/smoke.rs`) — ~30 set validation checks: SADD, SCARD, SISMEMBER, SMISMEMBER, SMEMBERS, SREM, SPOP, SRANDMEMBER, SMOVE, SINTER, SUNION, SDIFF, SINTERSTORE, SUNIONSTORE, SDIFFSTORE, SINTERCARD (with LIMIT), WRONGTYPE enforcement.
 
 **`just test`**: 333 tests in ~1.3s. **`just accept`**: 49 acceptance tests in ~10.5s.
+
+### What's been built (M8)
+
+**List commands** (`src/commands/lists.rs`, ~1200 lines) — 14 handlers:
+- **Core**: LPUSH, RPUSH (variadic, create-on-demand), LPOP, RPOP (with optional count), LLEN (O(1) from meta), LINDEX (O(1) direct lookup)
+- **Range**: LRANGE (paginated FDB range reads with Redis clamping), LSET (O(1) element update), LTRIM (range keep with clear_range)
+- **Conditional push**: LPUSHX, RPUSHX (only-if-exists semantics)
+- **Linear scan**: LREM (count > 0 forward, count < 0 backward, count == 0 all), LINSERT (BEFORE/AFTER pivot), LPOS (RANK/COUNT/MAXLEN options)
+
+**Design: index-based storage** — Elements stored at `list/<key, i64_index>` with signed integer indices. `ObjectMeta` tracks `list_head` (inclusive), `list_tail` (inclusive), `list_length`. LPUSH decrements head, RPUSH increments tail, giving O(1) push/pop and O(1) random access via LINDEX. This is a strict improvement over the Go MVP's linked-list approach (O(n) LINDEX, 3+ FDB reads per pop). LREM/LINSERT use compact-rewrite: read all elements, splice in memory, clear old range, rewrite at contiguous indices [0, N-1] — O(n) same as Redis.
+
+**Element size validation** — List elements are stored directly as FDB values (not chunked). Elements exceeding 100,000 bytes (FDB's hard limit) are rejected with a clear error message. This applies to LPUSH, RPUSH, LSET, and LINSERT.
+
+**LPOS optimization** — When MAXLEN is specified, only the relevant portion of the list is read from FDB (first N or last N elements depending on RANK direction), avoiding unnecessary reads on large lists.
+
+**Shared helpers**: `read_list_meta_for_write()` (type check + expired cleanup), `read_list_meta_for_read()` (type check only), `resolve_index()` (logical-to-FDB index translation), `normalize_range()` (Redis clamping semantics), `read_element_range()` (paginated FDB range reads), `write_or_delete_list_meta()` (preserves TTL, deletes key when empty), `compact_rewrite()` (clear + rewrite for LREM/LINSERT).
+
+**Integration tests** (`tests/lists.rs`) — 37 tests covering all 14 commands: LPUSH/RPUSH ordering (reversed vs preserved), interleaved push, LPOP/RPOP single and with count, count exceeds length, missing key returns Nil, LLEN on nonexistent and wrong type, LINDEX positive/negative/out-of-bounds, LRANGE full/subset/clamp, LSET update/out-of-range/no-such-key, LTRIM basic/empty-range/single-element, LPUSHX/RPUSHX existing-list/nonexistent-noop, LREM positive/negative/zero count and removes-all-deletes-key, LINSERT before/after and missing pivot/key, LPOS basic/RANK/COUNT/RANK-zero-rejection, WRONGTYPE matrix (11 commands on string key), arity errors (9 cases).
+
+**Acceptance tests** (`tests/accept_lists.rs`) — 10 tests: LPUSH/LINDEX roundtrip (100 cases), LPUSH/LPOP roundtrip (100 cases), LLEN grows-by-one (50 cases), RPUSH/LRANGE order preservation (50 cases), LREM matches Vec::retain model (30 cases), LTRIM matches slice model (30 cases), large list pagination 3-5K elements (3 cases), randomized LPUSH/RPUSH/LPOP/RPOP/LLEN/LINDEX against VecDeque model (30 cases), list lazy expiry, LPUSH on expired string creates new list, WRONGTYPE list vs hash cross-type.
+
+**Smoke tests** (`examples/smoke.rs`) — ~30 list validation checks: LPUSH, RPUSH, LLEN, LRANGE, LINDEX, LPOP, RPOP, LSET, LTRIM, LINSERT, LREM, LPOS, LPUSHX, RPUSHX, WRONGTYPE enforcement. Load phase includes list operations (LPUSH/RPUSH/LPOP/RPOP/LLEN/LRANGE at ~10% of workload).
+
+**`just test`**: 392 tests in ~2s. **`just accept`**: 60 acceptance tests in ~16s.
 
 ---
 
@@ -910,15 +935,7 @@ Each data structure milestone follows the same two-tier test pattern:
 
 **`just accept`**: Property tests — SINTER(A, B) == SINTER(B, A), SCARD(SADD(k, m)) <= SCARD(k) + 1. Randomized SADD/SREM sequences verified against in-memory HashSet model. Large sets (10K members). SUNION/SDIFF/SINTER on randomized set pairs.
 
-### Milestone 8: Sorted Set Commands
-
-**Commands**: ZADD, ZREM, ZSCORE, ZRANK, ZREVRANK, ZCARD, ZCOUNT, ZINCRBY, ZRANGE, ZREVRANGE, ZRANGEBYSCORE, ZRANGEBYLEX, ZREMRANGEBYRANK, ZREMRANGEBYSCORE, ZREMRANGEBYLEX, ZPOPMIN, ZPOPMAX, ZMSCORE, ZRANDMEMBER.
-
-**`just test`**: ZADD/ZSCORE/ZRANK round-trip, ZRANGE returns members in score order, ZADD with negative scores sorts correctly, ZADD NX/XX flags, ZRANGEBYSCORE with -inf and +inf, ZREVRANGE reverse order.
-
-**`just accept`**: Property tests — ZRANK(k, m) + ZREVRANK(k, m) == ZCARD(k) - 1, ZRANGE always sorted, dual index consistency (ZSCORE matches ZRANGE position). Randomized ZADD/ZREM sequences verified against BTreeMap model. Scores at IEEE 754 edge cases (-0, NaN, ±inf, subnormals). Large sorted sets (10K members).
-
-### Milestone 9: List Commands
+### Milestone 8: List Commands
 
 **Commands**: LPUSH, RPUSH, LPOP, RPOP, LLEN, LINDEX, LRANGE, LSET, LTRIM, LREM, LPUSHX, RPUSHX, LINSERT, LPOS.
 
@@ -926,23 +943,31 @@ Each data structure milestone follows the same two-tier test pattern:
 
 **`just test`**: LPUSH/RPUSH/LPOP/RPOP round-trip, LRANGE returns correct order, LINDEX with positive and negative indices, LINSERT BEFORE/AFTER, LREM with positive/negative/zero count, LPOS with RANK/COUNT, LTRIM boundary cases.
 
-**`just accept`**: Property tests — LLEN(LPUSH(k, v)) == LLEN(k) + 1, LPUSH then LPOP returns same element. Randomized interleaved LPUSH/RPUSH/LPOP/RPOP sequences verified against VecDeque model. LRANGE on lists with 5K elements. LREM/LTRIM correctness after random insertions.
+**`just accept`**: Property tests — LLEN(LPUSH(k, v)) == LLEN(k) + 1, LPUSH then LPOP returns same element. Randomized interleaved LPUSH/RPUSH/LPOP/RPOP sequences verified against VecDeque model. LRANGE on lists with 5K elements. LREM/LTRIM correctness after random insertions. TTL expiry integration. Cross-type WRONGTYPE matrix.
 
-**Exit criteria for M6-M9**: Each milestone's acceptance tests pass via `just accept`. All prior milestones' acceptance tests still pass. WRONGTYPE enforcement works across all types. `just test` still under 2 seconds. `just accept` under 15 seconds.
+**Exit criteria for M6-M8**: Each milestone's acceptance tests pass via `just accept`. All prior milestones' acceptance tests still pass. WRONGTYPE enforcement works across all types. `just test` still under 2 seconds. `just accept` under 15 seconds.
 
 ---
+
+### Milestone 9: Sorted Set Commands
+
+**Commands**: ZADD, ZREM, ZSCORE, ZRANK, ZREVRANK, ZCARD, ZCOUNT, ZINCRBY, ZRANGE, ZREVRANGE, ZRANGEBYSCORE, ZRANGEBYLEX, ZREMRANGEBYRANK, ZREMRANGEBYSCORE, ZREMRANGEBYLEX, ZPOPMIN, ZPOPMAX, ZMSCORE, ZRANDMEMBER.
+
+**`just test`**: ZADD/ZSCORE/ZRANK round-trip, ZRANGE returns members in score order, ZADD with negative scores sorts correctly, ZADD NX/XX flags, ZRANGEBYSCORE with -inf and +inf, ZREVRANGE reverse order.
+
+**`just accept`**: Property tests — ZRANK(k, m) + ZREVRANK(k, m) == ZCARD(k) - 1, ZRANGE always sorted, dual index consistency (ZSCORE matches ZRANGE position). Randomized ZADD/ZREM sequences verified against BTreeMap model. Scores at IEEE 754 edge cases (-0, NaN, ±inf, subnormals). Large sorted sets (10K members).
 
 ### Milestone 9.5: Cross-Key List Commands
 
 **Commands**: LMOVE, LMPOP.
 
-**Why separate**: These commands involve cross-key atomicity (LMOVE pops from one list and pushes to another; LMPOP scans multiple keys). FDB makes this trivially atomic within a single transaction, but the commands are more complex to implement and were added to Redis relatively late (6.2+). Separating them keeps M9 focused on the core list data structure.
+**Why separate**: These commands involve cross-key atomicity (LMOVE pops from one list and pushes to another; LMPOP scans multiple keys). FDB makes this trivially atomic within a single transaction, but the commands are more complex to implement and were added to Redis relatively late (6.2+). Separating them keeps M8 focused on the core list data structure.
 
 **`just test`**: LMOVE between two lists (LEFT/RIGHT x LEFT/RIGHT), LMOVE same-key rotation, LMOVE from nonexistent key returns Nil, LMPOP pops from first non-empty list in order, LMPOP with COUNT, LMPOP all keys empty returns Nil.
 
 **`just accept`**: LMOVE preserves element values across source/destination, LMOVE source deletion when emptied, LMPOP ordering determinism (always picks first non-empty key).
 
-**Exit criteria**: All M9 + M9.5 acceptance tests pass. Prior milestones unaffected. `just test` under 2 seconds. `just accept` under 15 seconds.
+**Exit criteria**: All M8 + M9.5 acceptance tests pass. Prior milestones unaffected. `just test` under 2 seconds. `just accept` under 15 seconds.
 
 ---
 
@@ -1156,10 +1181,10 @@ M3  FDB Storage Layer
  |
 M4  String Commands ────────── M5  Key Management & TTL
  |                                |
- ├── M6  Hash Commands            |
- ├── M7  Set Commands             |
- ├── M8  Sorted Set Commands      |
- └── M9  List Commands            |
+ ├── M6  Hash Commands ✓          |
+ ├── M7  Set Commands ✓           |
+ ├── M8  List Commands ✓          |
+ └── M9  Sorted Set Commands      |
        |                          |
        M10 Transactions ──────────┘
        |
@@ -1170,7 +1195,7 @@ M4  String Commands ────────── M5  Key Management & TTL
        M13 Compatibility Testing
 ```
 
-M0-M4 are strictly sequential. After M4, milestones M5-M9 can be worked in parallel (they share the storage layer but don't depend on each other). M10 depends on all data structures being in place. M11-M13 are sequential.
+M0-M4 are strictly sequential. After M4, milestones M5-M9 can be worked in parallel (they share the storage layer but don't depend on each other). M10 depends on all data structures being in place. M11-M13 are sequential. Lists were promoted to M8 and sorted sets moved to M9 for implementation-order reasons.
 
 ---
 
