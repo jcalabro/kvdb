@@ -14,7 +14,7 @@
 | M7: Set Commands | **Complete** | 16 commands (SADD, SREM, SISMEMBER, SMISMEMBER, SCARD, SMEMBERS, SPOP, SRANDMEMBER, SMOVE, SINTER, SUNION, SDIFF, SINTERSTORE, SUNIONSTORE, SDIFFSTORE, SINTERCARD). Direct FDB keys (existence = membership). Parallel existence checks via join_all. Multi-set ops computed in-memory. 37 integration tests, 9 acceptance tests (property-based + randomized model checking). |
 | M8: List Commands | **Complete** | 14 commands (LPUSH, RPUSH, LPOP, RPOP, LLEN, LINDEX, LRANGE, LSET, LTRIM, LREM, LPUSHX, RPUSHX, LINSERT, LPOS). Index-based storage (O(1) push/pop/LINDEX, O(k) LRANGE). Compact-rewrite for LREM/LINSERT. Element size validation (100KB FDB limit). 37 integration tests, 10 acceptance tests (property-based VecDeque model + TTL + WRONGTYPE). |
 | M9: Sorted Set Commands | **Complete** | 20 commands, dual-index FDB layout, 60 integration tests, 8 acceptance tests. |
-| M9.5: Cross-Key List Commands | Not started | LMOVE, LMPOP. |
+| M9.5: Cross-Key List Commands | **Complete** | 2 commands (LMOVE, LMPOP). Cross-key atomicity via single FDB transaction. 15 integration tests, 4 acceptance tests (property-based + model). |
 | M10: Transactions | Not started | |
 | M11: Pub/Sub | Not started | |
 | M12: Server Commands & Observability | Not started | |
@@ -224,6 +224,22 @@ FDB's tuple layer provides order-preserving f64 score encoding, so range scans b
 **Smoke tests** (`examples/smoke.rs`) — 19 sorted set validation checks: ZADD, ZCARD, ZSCORE, ZRANK, ZREVRANK, ZRANGE, ZREVRANGE, ZRANGEBYSCORE, ZCOUNT, ZINCRBY, ZPOPMIN, ZPOPMAX, ZREM, ZREMRANGEBYSCORE, ZMSCORE, ZRANDMEMBER, WRONGTYPE enforcement. Load phase includes sorted set operations (ZADD/ZSCORE/ZRANGE/ZREM at ~10% of workload).
 
 **`just test`**: 486 tests in ~2s. **`just accept`**: 68 acceptance tests in ~17s.
+
+### What's been built (M9.5)
+
+**Cross-key list commands** (`src/commands/lists.rs`) — 2 handlers:
+- **LMOVE**: Atomically pop from one end of source list and push to one end of destination list. All 4 direction combinations (LEFT/RIGHT x LEFT/RIGHT). Same-key rotation. Source auto-deletion when emptied. Single FDB transaction.
+- **LMPOP**: Pop elements from the first non-empty list among multiple keys. Scans keys in order. COUNT option for batch pops. Source auto-deletion when emptied. Single FDB transaction.
+
+Shared helper: `parse_direction()` for LEFT|RIGHT argument parsing (used by both commands).
+
+**Integration tests** (`tests/lists.rs`) — 15 tests: LMOVE all 4 direction combos, same-key rotation (both directions), nonexistent source, source deletion, push to existing destination, WRONGTYPE, arity errors. LMPOP single-key left/right, COUNT, first-nonempty selection, all-empty nil, count exceeding length, auto-deletion, WRONGTYPE, arity errors.
+
+**Acceptance tests** (`tests/accept_lists.rs`) — 4 tests: LMOVE value preservation property (50 cases), LMOVE source deletion integration, LMPOP first-nonempty determinism (30 cases), LMPOP model matching against VecDeque model (20 cases).
+
+**Smoke tests** (`examples/smoke.rs`) — 9 checks: LMOVE cross-key move, same-key rotation, nonexistent source nil. LMPOP first-nonempty, COUNT, all-empty nil.
+
+**`just test`**: 510 tests in ~1.9s. **`just accept`**: 76 acceptance tests in ~18s.
 
 ---
 

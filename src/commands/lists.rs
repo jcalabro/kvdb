@@ -1,5 +1,6 @@
 //! List command handlers: LPUSH, RPUSH, LPOP, RPOP, LLEN, LINDEX,
-//! LRANGE, LSET, LTRIM, LREM, LPUSHX, RPUSHX, LINSERT, LPOS.
+//! LRANGE, LSET, LTRIM, LREM, LPUSHX, RPUSHX, LINSERT, LPOS, LMOVE,
+//! LMPOP.
 //!
 //! # Design: index-based storage
 //!
@@ -1135,6 +1136,300 @@ pub async fn handle_lpos(args: &[Bytes], state: &ConnectionState) -> RespValue {
                 RespValue::Array(Some(matches.into_iter().map(RespValue::Integer).collect()))
             }
         }
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Direction helper (shared by LMOVE, LMPOP)
+// ---------------------------------------------------------------------------
+
+/// Parse a direction argument: LEFT or RIGHT (case-insensitive).
+///
+/// Returns `Ok(true)` for LEFT, `Ok(false)` for RIGHT, or an `Err(RespValue)`
+/// syntax error for anything else.
+pub(crate) fn parse_direction(arg: &Bytes) -> Result<bool, RespValue> {
+    let upper = arg.to_ascii_uppercase();
+    match upper.as_slice() {
+        b"LEFT" => Ok(true),
+        b"RIGHT" => Ok(false),
+        _ => Err(RespValue::err("ERR syntax error")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LMOVE source destination LEFT|RIGHT LEFT|RIGHT
+// ---------------------------------------------------------------------------
+
+/// LMOVE source destination LEFT|RIGHT LEFT|RIGHT — Atomically move an
+/// element from one list to another.
+///
+/// Pops from the specified end of `source` and pushes to the specified end
+/// of `destination`. Returns the moved element as a bulk string, or nil if
+/// the source list is empty or doesn't exist. Source and destination may be
+/// the same key (rotation).
+pub async fn handle_lmove(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.len() != 4 {
+        return RespValue::err(CommandError::WrongArity { name: "LMOVE".into() }.to_string());
+    }
+
+    let src_left = match parse_direction(&args[2]) {
+        Ok(left) => left,
+        Err(resp) => return resp,
+    };
+    let dst_left = match parse_direction(&args[3]) {
+        Ok(left) => left,
+        Err(resp) => return resp,
+    };
+
+    match run_transact(&state.db, "LMOVE", |tr| {
+        let dirs = state.dirs.clone();
+        let args = args.to_vec();
+        async move {
+            let src_key = &args[0];
+            let dst_key = &args[1];
+            let same_key = src_key == dst_key;
+
+            // --- Read source meta ---
+            let src_meta = read_list_meta_for_write(&tr, &dirs, src_key).await?;
+            let src_meta = match src_meta {
+                None => return Ok(None),
+                Some(m) => {
+                    if m.list_length == 0 {
+                        return Ok(None);
+                    }
+                    m
+                }
+            };
+
+            let mut src_head = src_meta.list_head;
+            let mut src_tail = src_meta.list_tail;
+            let mut src_length = src_meta.list_length;
+
+            // --- Pop from source ---
+            let pop_idx = if src_left { src_head } else { src_tail };
+            let fdb_key = dirs.list.pack(&(src_key.as_ref(), pop_idx));
+            let val = tr
+                .get(&fdb_key, false)
+                .await
+                .map_err(|e| helpers::cmd_err(CommandError::Generic(e.to_string())))?;
+
+            let element = match val {
+                Some(v) => v.to_vec(),
+                None => {
+                    return Err(helpers::cmd_err(CommandError::Generic(format!(
+                        "list index {pop_idx} missing but meta claims length {src_length}"
+                    ))));
+                }
+            };
+            tr.clear(&fdb_key);
+
+            if src_left {
+                src_head += 1;
+            } else {
+                src_tail -= 1;
+            }
+            src_length -= 1;
+
+            // --- Push to destination ---
+            if same_key {
+                // Source and destination are the same key. Use post-pop state.
+                if src_length == 0 {
+                    // Popped the only element — push it back as the sole element.
+                    src_head = 0;
+                    src_tail = 0;
+                    src_length = 1;
+                    tr.set(&dirs.list.pack(&(src_key.as_ref(), 0i64)), element.as_slice());
+                } else if dst_left {
+                    src_head -= 1;
+                    src_length += 1;
+                    tr.set(&dirs.list.pack(&(src_key.as_ref(), src_head)), element.as_slice());
+                } else {
+                    src_tail += 1;
+                    src_length += 1;
+                    tr.set(&dirs.list.pack(&(src_key.as_ref(), src_tail)), element.as_slice());
+                }
+
+                write_or_delete_list_meta(&tr, &dirs, src_key, Some(&src_meta), src_head, src_tail, src_length)?;
+            } else {
+                // Different keys — update source, then read/push destination.
+
+                // Update source meta (may delete if now empty).
+                write_or_delete_list_meta(&tr, &dirs, src_key, Some(&src_meta), src_head, src_tail, src_length)?;
+
+                // Read destination meta.
+                let dst_meta = read_list_meta_for_write(&tr, &dirs, dst_key).await?;
+
+                let (mut dst_head, mut dst_tail, mut dst_length) = match &dst_meta {
+                    Some(m) => (m.list_head, m.list_tail, m.list_length),
+                    None => (0, 0, 0),
+                };
+
+                if dst_length == 0 {
+                    // Destination doesn't exist or is empty — create it.
+                    dst_head = 0;
+                    dst_tail = 0;
+                    dst_length = 1;
+                    tr.set(&dirs.list.pack(&(dst_key.as_ref(), 0i64)), element.as_slice());
+                } else if dst_left {
+                    dst_head -= 1;
+                    dst_length += 1;
+                    tr.set(&dirs.list.pack(&(dst_key.as_ref(), dst_head)), element.as_slice());
+                } else {
+                    dst_tail += 1;
+                    dst_length += 1;
+                    tr.set(&dirs.list.pack(&(dst_key.as_ref(), dst_tail)), element.as_slice());
+                }
+
+                write_or_delete_list_meta(&tr, &dirs, dst_key, dst_meta.as_ref(), dst_head, dst_tail, dst_length)?;
+            }
+
+            Ok(Some(element))
+        }
+    })
+    .await
+    {
+        Ok(Some(element)) => RespValue::BulkString(Some(Bytes::from(element))),
+        Ok(None) => RespValue::BulkString(None),
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LMPOP numkeys key [key ...] LEFT|RIGHT [COUNT count]
+// ---------------------------------------------------------------------------
+
+/// LMPOP numkeys key [key ...] LEFT|RIGHT [COUNT count]
+///
+/// Scans the given keys in order and pops up to COUNT (default 1) elements
+/// from the first non-empty list found. Only one list is affected per call.
+///
+/// Returns a two-element array `[key_name, [elements...]]`, or nil if all
+/// lists are empty or missing.
+pub async fn handle_lmpop(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    // Minimum args: numkeys + at least 1 key + direction = 3
+    if args.len() < 3 {
+        return RespValue::err(CommandError::WrongArity { name: "LMPOP".into() }.to_string());
+    }
+
+    // Parse numkeys.
+    let numkeys = match parse_i64_arg(&args[0]) {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
+    if numkeys < 1 {
+        return RespValue::err("ERR numkeys can't be non-positive value");
+    }
+    let numkeys = numkeys as usize;
+
+    // Validate we have enough arguments: numkeys-arg + numkeys keys + direction.
+    let dir_pos = 1 + numkeys;
+    if dir_pos >= args.len() {
+        return RespValue::err(CommandError::WrongArity { name: "LMPOP".into() }.to_string());
+    }
+
+    // Parse direction (LEFT|RIGHT).
+    let from_head = match parse_direction(&args[dir_pos]) {
+        Ok(left) => left,
+        Err(resp) => return resp,
+    };
+
+    // Parse optional COUNT (default 1).
+    // After direction, remaining args should be nothing or "COUNT <n>".
+    let remaining = &args[dir_pos + 1..];
+    let count: u64 = match remaining.len() {
+        0 => 1,
+        2 => {
+            let kw = remaining[0].to_ascii_uppercase();
+            if kw.as_slice() != b"COUNT" {
+                return RespValue::err("ERR syntax error");
+            }
+            match parse_i64_arg(&remaining[1]) {
+                Ok(c) if c < 1 => {
+                    return RespValue::err("ERR COUNT value of 0 is not allowed");
+                }
+                Ok(c) => c as u64,
+                Err(resp) => return resp,
+            }
+        }
+        _ => return RespValue::err("ERR syntax error"),
+    };
+
+    match run_transact(&state.db, "LMPOP", |tr| {
+        let dirs = state.dirs.clone();
+        let args = args.to_vec();
+        async move {
+            let keys = &args[1..1 + numkeys];
+
+            for key in keys {
+                let meta = read_list_meta_for_write(&tr, &dirs, key).await?;
+
+                let meta = match meta {
+                    None => continue,
+                    Some(m) => {
+                        if m.list_length == 0 {
+                            continue;
+                        }
+                        m
+                    }
+                };
+
+                // Found a non-empty list — pop up to `count` elements.
+                let to_pop = count.min(meta.list_length);
+                let mut popped: Vec<Vec<u8>> = Vec::with_capacity(to_pop as usize);
+
+                let mut head = meta.list_head;
+                let mut tail = meta.list_tail;
+                let mut length = meta.list_length;
+
+                for _ in 0..to_pop {
+                    let fdb_idx = if from_head { head } else { tail };
+                    let fdb_key = dirs.list.pack(&(key.as_ref(), fdb_idx));
+                    let val = tr
+                        .get(&fdb_key, false)
+                        .await
+                        .map_err(|e| helpers::cmd_err(CommandError::Generic(e.to_string())))?;
+
+                    let bytes = match val {
+                        Some(v) => v.to_vec(),
+                        None => {
+                            return Err(helpers::cmd_err(CommandError::Generic(format!(
+                                "list index {fdb_idx} missing but meta claims length {length}"
+                            ))));
+                        }
+                    };
+                    tr.clear(&fdb_key);
+                    popped.push(bytes);
+
+                    if from_head {
+                        head += 1;
+                    } else {
+                        tail -= 1;
+                    }
+                    length -= 1;
+                }
+
+                write_or_delete_list_meta(&tr, &dirs, key, Some(&meta), head, tail, length)?;
+
+                return Ok(Some((key.clone(), popped)));
+            }
+
+            // No non-empty list found.
+            Ok(None)
+        }
+    })
+    .await
+    {
+        Ok(None) => RespValue::Array(None),
+        Ok(Some((key, elements))) => RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(key)),
+            RespValue::Array(Some(
+                elements
+                    .into_iter()
+                    .map(|v| RespValue::BulkString(Some(Bytes::from(v))))
+                    .collect(),
+            )),
+        ])),
         Err(e) => helpers::storage_err_to_resp(e),
     }
 }

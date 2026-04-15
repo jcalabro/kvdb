@@ -627,4 +627,307 @@ mod accept {
         let err = format!("{}", result.unwrap_err());
         assert!(err.contains("WRONGTYPE"), "expected WRONGTYPE, got: {err}");
     }
+
+    // -----------------------------------------------------------------------
+    // LMOVE: element value is preserved across source/destination
+    // -----------------------------------------------------------------------
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(50))]
+
+        #[test]
+        fn lmove_preserves_element_value(
+            elements in prop::collection::vec(
+                prop::collection::vec(any::<u8>(), 1..50),
+                2..10,
+            ),
+            from_left in any::<bool>(),
+            to_left in any::<bool>(),
+        ) {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let ctx = TestContext::new().await;
+                let mut con = ctx.connection().await;
+
+                // Seed source list.
+                let mut cmd = redis::cmd("RPUSH");
+                cmd.arg("src");
+                for e in &elements {
+                    cmd.arg(e.as_slice());
+                }
+                let _: i64 = cmd.query_async(&mut con).await.unwrap();
+
+                let wherefrom = if from_left { "LEFT" } else { "RIGHT" };
+                let whereto = if to_left { "LEFT" } else { "RIGHT" };
+
+                let moved: Vec<u8> = redis::cmd("LMOVE")
+                    .arg("src")
+                    .arg("dst")
+                    .arg(wherefrom)
+                    .arg(whereto)
+                    .query_async(&mut con)
+                    .await
+                    .unwrap();
+
+                // The moved element must match what was at the popped end.
+                let expected = if from_left {
+                    elements.first().unwrap().clone()
+                } else {
+                    elements.last().unwrap().clone()
+                };
+                prop_assert_eq!(&moved, &expected);
+
+                // Destination should contain exactly the moved element.
+                let dst: Vec<Vec<u8>> = redis::cmd("LRANGE")
+                    .arg("dst")
+                    .arg(0)
+                    .arg(-1)
+                    .query_async(&mut con)
+                    .await
+                    .unwrap();
+                prop_assert_eq!(dst.len(), 1);
+                prop_assert_eq!(&dst[0], &expected);
+                Ok(())
+            })?;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // LMOVE: source deletion when emptied
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn accept_lmove_source_deletion() {
+        let ctx = TestContext::new().await;
+        let mut con = ctx.connection().await;
+
+        let _: i64 = redis::cmd("RPUSH")
+            .arg("src")
+            .arg("a")
+            .arg("b")
+            .arg("c")
+            .query_async(&mut con)
+            .await
+            .unwrap();
+
+        for expected in &["a", "b", "c"] {
+            let moved: String = redis::cmd("LMOVE")
+                .arg("src")
+                .arg("dst")
+                .arg("LEFT")
+                .arg("RIGHT")
+                .query_async(&mut con)
+                .await
+                .unwrap();
+            assert_eq!(&moved, expected);
+        }
+
+        let exists: i64 = redis::cmd("EXISTS").arg("src").query_async(&mut con).await.unwrap();
+        assert_eq!(exists, 0);
+
+        let dst: Vec<String> = redis::cmd("LRANGE")
+            .arg("dst")
+            .arg(0)
+            .arg(-1)
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        assert_eq!(dst, vec!["a", "b", "c"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // LMPOP: ordering determinism (always picks first non-empty key)
+    // -----------------------------------------------------------------------
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(30))]
+
+        #[test]
+        fn lmpop_picks_first_nonempty_deterministically(
+            has_elements in prop::collection::vec(any::<bool>(), 3..=3),
+            from_left in any::<bool>(),
+        ) {
+            // Ensure at least one key has elements.
+            let has_elements: Vec<bool> = if has_elements.iter().all(|&b| !b) {
+                vec![true, false, false]
+            } else {
+                has_elements
+            };
+
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let ctx = TestContext::new().await;
+                let mut con = ctx.connection().await;
+
+                let keys = ["k0", "k1", "k2"];
+                let mut first_nonempty: Option<&str> = None;
+
+                for (i, &has) in has_elements.iter().enumerate() {
+                    if has {
+                        let _: i64 = redis::cmd("RPUSH")
+                            .arg(keys[i])
+                            .arg(format!("elem_{i}"))
+                            .query_async(&mut con)
+                            .await
+                            .unwrap();
+                        if first_nonempty.is_none() {
+                            first_nonempty = Some(keys[i]);
+                        }
+                    }
+                }
+
+                let direction = if from_left { "LEFT" } else { "RIGHT" };
+                let result: Vec<redis::Value> = redis::cmd("LMPOP")
+                    .arg(3)
+                    .arg("k0")
+                    .arg("k1")
+                    .arg("k2")
+                    .arg(direction)
+                    .query_async(&mut con)
+                    .await
+                    .unwrap();
+
+                let expected_key = first_nonempty.unwrap();
+                match &result[0] {
+                    redis::Value::BulkString(b) => {
+                        prop_assert_eq!(
+                            std::str::from_utf8(b).unwrap(),
+                            expected_key,
+                        );
+                    }
+                    other => prop_assert!(false, "expected bulk string key name, got: {:?}", other),
+                }
+                Ok(())
+            })?;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // LMPOP: randomized model test with multiple keys
+    // -----------------------------------------------------------------------
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(20))]
+
+        #[test]
+        fn lmpop_matches_model(
+            list0 in prop::collection::vec(0u8..20, 0..10),
+            list1 in prop::collection::vec(0u8..20, 0..10),
+            list2 in prop::collection::vec(0u8..20, 0..10),
+            from_left in any::<bool>(),
+            count in 1u64..5,
+        ) {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let ctx = TestContext::new().await;
+                let mut con = ctx.connection().await;
+
+                let keys = ["k0", "k1", "k2"];
+                let mut models: Vec<VecDeque<String>> = vec![
+                    list0.iter().map(|e| e.to_string()).collect(),
+                    list1.iter().map(|e| e.to_string()).collect(),
+                    list2.iter().map(|e| e.to_string()).collect(),
+                ];
+
+                // Seed lists in Redis.
+                for (i, list) in [&list0, &list1, &list2].iter().enumerate() {
+                    if !list.is_empty() {
+                        let mut cmd = redis::cmd("RPUSH");
+                        cmd.arg(keys[i]);
+                        for e in list.iter() {
+                            cmd.arg(e.to_string());
+                        }
+                        let _: i64 = cmd.query_async(&mut con).await.unwrap();
+                    }
+                }
+
+                let direction = if from_left { "LEFT" } else { "RIGHT" };
+
+                // Compute model expectation: find first non-empty.
+                let mut expected_key_idx: Option<usize> = None;
+                for (i, m) in models.iter().enumerate() {
+                    if !m.is_empty() {
+                        expected_key_idx = Some(i);
+                        break;
+                    }
+                }
+
+                let result: redis::Value = redis::cmd("LMPOP")
+                    .arg(3)
+                    .arg("k0")
+                    .arg("k1")
+                    .arg("k2")
+                    .arg(direction)
+                    .arg("COUNT")
+                    .arg(count)
+                    .query_async(&mut con)
+                    .await
+                    .unwrap();
+
+                match expected_key_idx {
+                    None => {
+                        prop_assert_eq!(result, redis::Value::Nil);
+                    }
+                    Some(ki) => {
+                        let model = &mut models[ki];
+                        let to_pop = (count as usize).min(model.len());
+                        let mut expected_popped = Vec::new();
+                        for _ in 0..to_pop {
+                            let e = if from_left {
+                                model.pop_front().unwrap()
+                            } else {
+                                model.pop_back().unwrap()
+                            };
+                            expected_popped.push(e);
+                        }
+
+                        match result {
+                            redis::Value::Array(ref arr) => {
+                                prop_assert_eq!(arr.len(), 2);
+                                match &arr[0] {
+                                    redis::Value::BulkString(b) => {
+                                        prop_assert_eq!(
+                                            std::str::from_utf8(b).unwrap(),
+                                            keys[ki],
+                                        );
+                                    }
+                                    other => prop_assert!(false, "expected key, got: {:?}", other),
+                                }
+                                match &arr[1] {
+                                    redis::Value::Array(elems) => {
+                                        prop_assert_eq!(elems.len(), expected_popped.len());
+                                        for (j, elem) in elems.iter().enumerate() {
+                                            match elem {
+                                                redis::Value::BulkString(b) => {
+                                                    prop_assert_eq!(
+                                                        std::str::from_utf8(b).unwrap(),
+                                                        expected_popped[j].as_str(),
+                                                    );
+                                                }
+                                                other => prop_assert!(false, "expected element, got: {:?}", other),
+                                            }
+                                        }
+                                    }
+                                    other => prop_assert!(false, "expected elems array, got: {:?}", other),
+                                }
+                            }
+                            other => prop_assert!(false, "expected array result, got: {:?}", other),
+                        }
+
+                        // Verify remaining list matches model.
+                        let remaining: Vec<String> = redis::cmd("LRANGE")
+                            .arg(keys[ki])
+                            .arg(0)
+                            .arg(-1)
+                            .query_async(&mut con)
+                            .await
+                            .unwrap();
+                        let model_remaining: Vec<String> = model.iter().cloned().collect();
+                        prop_assert_eq!(remaining, model_remaining);
+                    }
+                }
+                Ok(())
+            })?;
+        }
+    }
 }

@@ -1790,6 +1790,133 @@ async fn run_validate(addr: &str) -> bool {
         Ok(v) => t.fail("LPUSH WRONGTYPE on string", &format!("expected error, got: {v}")),
     }
 
+    // LMOVE: move from src to dst
+    let _: redis::RedisResult<i64> = redis::cmd("DEL")
+        .arg("lmove_src")
+        .arg("lmove_dst")
+        .query_async(&mut con)
+        .await;
+    let _: redis::RedisResult<i64> = redis::cmd("RPUSH")
+        .arg("lmove_src")
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .query_async(&mut con)
+        .await;
+    let result: redis::RedisResult<String> = redis::cmd("LMOVE")
+        .arg("lmove_src")
+        .arg("lmove_dst")
+        .arg("LEFT")
+        .arg("RIGHT")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("LMOVE LEFT RIGHT returns element", result, "a".to_string());
+
+    let result: redis::RedisResult<Vec<String>> = redis::cmd("LRANGE")
+        .arg("lmove_src")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await;
+    t.check_eq("LMOVE source after move", result, vec!["b".to_string(), "c".into()]);
+
+    let result: redis::RedisResult<Vec<String>> = redis::cmd("LRANGE")
+        .arg("lmove_dst")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await;
+    t.check_eq("LMOVE dest after move", result, vec!["a".to_string()]);
+
+    // LMOVE same-key rotation
+    let result: redis::RedisResult<String> = redis::cmd("LMOVE")
+        .arg("lmove_src")
+        .arg("lmove_src")
+        .arg("LEFT")
+        .arg("RIGHT")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("LMOVE same-key rotation", result, "b".to_string());
+    let result: redis::RedisResult<Vec<String>> = redis::cmd("LRANGE")
+        .arg("lmove_src")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await;
+    t.check_eq("LMOVE after rotation", result, vec!["c".to_string(), "b".into()]);
+
+    // LMOVE nonexistent source returns nil
+    let result: redis::RedisResult<Option<String>> = redis::cmd("LMOVE")
+        .arg("nosuch_lmove")
+        .arg("lmove_dst")
+        .arg("LEFT")
+        .arg("RIGHT")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("LMOVE nonexistent returns nil", result, None);
+
+    // LMPOP: pop from first non-empty
+    let _: redis::RedisResult<i64> = redis::cmd("DEL")
+        .arg("lmpop1")
+        .arg("lmpop2")
+        .query_async(&mut con)
+        .await;
+    let _: redis::RedisResult<i64> = redis::cmd("RPUSH")
+        .arg("lmpop2")
+        .arg("x")
+        .arg("y")
+        .arg("z")
+        .query_async(&mut con)
+        .await;
+
+    let result: redis::RedisResult<redis::Value> = redis::cmd("LMPOP")
+        .arg(2)
+        .arg("lmpop1")
+        .arg("lmpop2")
+        .arg("LEFT")
+        .query_async(&mut con)
+        .await;
+    match result {
+        Ok(redis::Value::Array(ref arr)) if arr.len() == 2 => match &arr[0] {
+            redis::Value::BulkString(b) if b == b"lmpop2" => t.pass("LMPOP picks first nonempty key"),
+            other => t.fail("LMPOP picks first nonempty key", &format!("wrong key: {other:?}")),
+        },
+        Ok(ref other) => t.fail("LMPOP picks first nonempty key", &format!("unexpected: {other:?}")),
+        Err(ref e) => t.fail("LMPOP picks first nonempty key", &format!("error: {e}")),
+    }
+
+    // LMPOP with COUNT
+    let result: redis::RedisResult<redis::Value> = redis::cmd("LMPOP")
+        .arg(1)
+        .arg("lmpop2")
+        .arg("RIGHT")
+        .arg("COUNT")
+        .arg(2)
+        .query_async(&mut con)
+        .await;
+    match result {
+        Ok(redis::Value::Array(ref arr)) if arr.len() == 2 => match &arr[1] {
+            redis::Value::Array(elems) if elems.len() == 2 => t.pass("LMPOP COUNT 2"),
+            other => t.fail("LMPOP COUNT 2", &format!("wrong elements: {other:?}")),
+        },
+        Ok(ref other) => t.fail("LMPOP COUNT 2", &format!("unexpected: {other:?}")),
+        Err(ref e) => t.fail("LMPOP COUNT 2", &format!("error: {e}")),
+    }
+
+    // LMPOP all empty returns nil
+    let result: redis::RedisResult<redis::Value> = redis::cmd("LMPOP")
+        .arg(2)
+        .arg("nolist1")
+        .arg("nolist2")
+        .arg("LEFT")
+        .query_async(&mut con)
+        .await;
+    match result {
+        Ok(redis::Value::Nil) => t.pass("LMPOP all empty returns nil"),
+        Ok(ref other) => t.fail("LMPOP all empty returns nil", &format!("expected nil, got: {other:?}")),
+        Err(ref e) => t.fail("LMPOP all empty returns nil", &format!("error: {e}")),
+    }
+
     // Empty-list auto-deletion: pop all, verify EXISTS == 0
     let _: redis::RedisResult<i64> = redis::cmd("DEL").arg("smoke_list").query_async(&mut con).await;
     let _: redis::RedisResult<i64> = redis::cmd("RPUSH")

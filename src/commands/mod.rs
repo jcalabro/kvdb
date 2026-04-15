@@ -138,6 +138,8 @@ pub async fn dispatch(cmd: &RedisCommand, state: &mut ConnectionState) -> Comman
         b"LREM" => CommandResponse::Reply(lists::handle_lrem(&cmd.args, state).await),
         b"LINSERT" => CommandResponse::Reply(lists::handle_linsert(&cmd.args, state).await),
         b"LPOS" => CommandResponse::Reply(lists::handle_lpos(&cmd.args, state).await),
+        b"LMOVE" => CommandResponse::Reply(lists::handle_lmove(&cmd.args, state).await),
+        b"LMPOP" => CommandResponse::Reply(lists::handle_lmpop(&cmd.args, state).await),
         b"ZADD" => CommandResponse::Reply(sorted_sets::handle_zadd(&cmd.args, state).await),
         b"ZCARD" => CommandResponse::Reply(sorted_sets::handle_zcard(&cmd.args, state).await),
         b"ZSCORE" => CommandResponse::Reply(sorted_sets::handle_zscore(&cmd.args, state).await),

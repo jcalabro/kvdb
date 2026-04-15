@@ -1083,6 +1083,607 @@ async fn lpos_rank_zero_rejected() {
 }
 
 // ---------------------------------------------------------------------------
+// LMOVE
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn lmove_left_left() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("RPUSH")
+        .arg("src")
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let moved: String = redis::cmd("LMOVE")
+        .arg("src")
+        .arg("dst")
+        .arg("LEFT")
+        .arg("LEFT")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(moved, "a");
+
+    let src: Vec<String> = redis::cmd("LRANGE")
+        .arg("src")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(src, vec!["b", "c"]);
+
+    let dst: Vec<String> = redis::cmd("LRANGE")
+        .arg("dst")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(dst, vec!["a"]);
+}
+
+#[tokio::test]
+async fn lmove_right_left() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("RPUSH")
+        .arg("src")
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let moved: String = redis::cmd("LMOVE")
+        .arg("src")
+        .arg("dst")
+        .arg("RIGHT")
+        .arg("LEFT")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(moved, "c");
+
+    let src: Vec<String> = redis::cmd("LRANGE")
+        .arg("src")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(src, vec!["a", "b"]);
+
+    let dst: Vec<String> = redis::cmd("LRANGE")
+        .arg("dst")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(dst, vec!["c"]);
+}
+
+#[tokio::test]
+async fn lmove_right_right() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("RPUSH")
+        .arg("src")
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let moved: String = redis::cmd("LMOVE")
+        .arg("src")
+        .arg("dst")
+        .arg("RIGHT")
+        .arg("RIGHT")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(moved, "c");
+
+    let src: Vec<String> = redis::cmd("LRANGE")
+        .arg("src")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(src, vec!["a", "b"]);
+
+    let dst: Vec<String> = redis::cmd("LRANGE")
+        .arg("dst")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(dst, vec!["c"]);
+}
+
+#[tokio::test]
+async fn lmove_left_right() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("RPUSH")
+        .arg("src")
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let moved: String = redis::cmd("LMOVE")
+        .arg("src")
+        .arg("dst")
+        .arg("LEFT")
+        .arg("RIGHT")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(moved, "a");
+
+    let src: Vec<String> = redis::cmd("LRANGE")
+        .arg("src")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(src, vec!["b", "c"]);
+
+    let dst: Vec<String> = redis::cmd("LRANGE")
+        .arg("dst")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(dst, vec!["a"]);
+}
+
+#[tokio::test]
+async fn lmove_same_key_rotation() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("RPUSH")
+        .arg("mylist")
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let moved: String = redis::cmd("LMOVE")
+        .arg("mylist")
+        .arg("mylist")
+        .arg("LEFT")
+        .arg("RIGHT")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(moved, "a");
+
+    let got: Vec<String> = redis::cmd("LRANGE")
+        .arg("mylist")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(got, vec!["b", "c", "a"]);
+}
+
+#[tokio::test]
+async fn lmove_same_key_rotation_right_to_left() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("RPUSH")
+        .arg("mylist")
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let moved: String = redis::cmd("LMOVE")
+        .arg("mylist")
+        .arg("mylist")
+        .arg("RIGHT")
+        .arg("LEFT")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(moved, "c");
+
+    let got: Vec<String> = redis::cmd("LRANGE")
+        .arg("mylist")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(got, vec!["c", "a", "b"]);
+}
+
+#[tokio::test]
+async fn lmove_nonexistent_source_returns_nil() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let result: Option<String> = redis::cmd("LMOVE")
+        .arg("nosuch")
+        .arg("dst")
+        .arg("LEFT")
+        .arg("RIGHT")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(result, None);
+
+    // dst should not have been created.
+    let exists: i64 = redis::cmd("EXISTS").arg("dst").query_async(&mut con).await.unwrap();
+    assert_eq!(exists, 0);
+}
+
+#[tokio::test]
+async fn lmove_empties_source_deletes_key() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("RPUSH")
+        .arg("src")
+        .arg("only")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let moved: String = redis::cmd("LMOVE")
+        .arg("src")
+        .arg("dst")
+        .arg("LEFT")
+        .arg("LEFT")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(moved, "only");
+
+    let exists: i64 = redis::cmd("EXISTS").arg("src").query_async(&mut con).await.unwrap();
+    assert_eq!(exists, 0);
+
+    let dst: Vec<String> = redis::cmd("LRANGE")
+        .arg("dst")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(dst, vec!["only"]);
+}
+
+#[tokio::test]
+async fn lmove_pushes_to_existing_destination() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("RPUSH")
+        .arg("src")
+        .arg("x")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let _: i64 = redis::cmd("RPUSH")
+        .arg("dst")
+        .arg("a")
+        .arg("b")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let moved: String = redis::cmd("LMOVE")
+        .arg("src")
+        .arg("dst")
+        .arg("LEFT")
+        .arg("LEFT")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(moved, "x");
+
+    let dst: Vec<String> = redis::cmd("LRANGE")
+        .arg("dst")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(dst, vec!["x", "a", "b"]);
+}
+
+// ---------------------------------------------------------------------------
+// LMPOP
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn lmpop_single_key_left() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("RPUSH")
+        .arg("mylist")
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let result: Vec<redis::Value> = redis::cmd("LMPOP")
+        .arg(1)
+        .arg("mylist")
+        .arg("LEFT")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    assert_eq!(result.len(), 2);
+    match &result[0] {
+        redis::Value::BulkString(b) => assert_eq!(b, b"mylist"),
+        other => panic!("expected bulk string, got: {other:?}"),
+    }
+    match &result[1] {
+        redis::Value::Array(arr) => {
+            assert_eq!(arr.len(), 1);
+            match &arr[0] {
+                redis::Value::BulkString(b) => assert_eq!(b, b"a"),
+                other => panic!("expected bulk string, got: {other:?}"),
+            }
+        }
+        other => panic!("expected array, got: {other:?}"),
+    }
+
+    // Remaining list should be [b, c]
+    let remaining: Vec<String> = redis::cmd("LRANGE")
+        .arg("mylist")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(remaining, vec!["b", "c"]);
+}
+
+#[tokio::test]
+async fn lmpop_single_key_right_with_count() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("RPUSH")
+        .arg("mylist")
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .arg("d")
+        .arg("e")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let result: Vec<redis::Value> = redis::cmd("LMPOP")
+        .arg(1)
+        .arg("mylist")
+        .arg("RIGHT")
+        .arg("COUNT")
+        .arg(3)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    assert_eq!(result.len(), 2);
+    match &result[0] {
+        redis::Value::BulkString(b) => assert_eq!(b, b"mylist"),
+        other => panic!("expected bulk string, got: {other:?}"),
+    }
+    match &result[1] {
+        redis::Value::Array(arr) => {
+            assert_eq!(arr.len(), 3);
+            let popped: Vec<&[u8]> = arr
+                .iter()
+                .map(|v| match v {
+                    redis::Value::BulkString(b) => b.as_slice(),
+                    other => panic!("expected bulk string, got: {other:?}"),
+                })
+                .collect();
+            assert_eq!(popped, vec![b"e", b"d", b"c"]);
+        }
+        other => panic!("expected array, got: {other:?}"),
+    }
+
+    // Remaining list should be [a, b]
+    let remaining: Vec<String> = redis::cmd("LRANGE")
+        .arg("mylist")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(remaining, vec!["a", "b"]);
+}
+
+#[tokio::test]
+async fn lmpop_picks_first_nonempty() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // key1 does not exist. key2 has [x, y]. key3 has [z].
+    let _: i64 = redis::cmd("RPUSH")
+        .arg("key2")
+        .arg("x")
+        .arg("y")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let _: i64 = redis::cmd("RPUSH")
+        .arg("key3")
+        .arg("z")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let result: Vec<redis::Value> = redis::cmd("LMPOP")
+        .arg(3)
+        .arg("key1")
+        .arg("key2")
+        .arg("key3")
+        .arg("LEFT")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    assert_eq!(result.len(), 2);
+    match &result[0] {
+        redis::Value::BulkString(b) => assert_eq!(b, b"key2"),
+        other => panic!("expected bulk string for key name, got: {other:?}"),
+    }
+    match &result[1] {
+        redis::Value::Array(arr) => {
+            assert_eq!(arr.len(), 1);
+            match &arr[0] {
+                redis::Value::BulkString(b) => assert_eq!(b, b"x"),
+                other => panic!("expected bulk string, got: {other:?}"),
+            }
+        }
+        other => panic!("expected array, got: {other:?}"),
+    }
+
+    // key3 should be untouched
+    let key3: Vec<String> = redis::cmd("LRANGE")
+        .arg("key3")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(key3, vec!["z"]);
+}
+
+#[tokio::test]
+async fn lmpop_all_empty_returns_nil() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let result: redis::Value = redis::cmd("LMPOP")
+        .arg(2)
+        .arg("empty1")
+        .arg("empty2")
+        .arg("LEFT")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(result, redis::Value::Nil);
+}
+
+#[tokio::test]
+async fn lmpop_count_exceeds_length() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("RPUSH")
+        .arg("short")
+        .arg("a")
+        .arg("b")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let result: Vec<redis::Value> = redis::cmd("LMPOP")
+        .arg(1)
+        .arg("short")
+        .arg("LEFT")
+        .arg("COUNT")
+        .arg(10)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    assert_eq!(result.len(), 2);
+    match &result[1] {
+        redis::Value::Array(arr) => {
+            assert_eq!(arr.len(), 2);
+            let popped: Vec<&[u8]> = arr
+                .iter()
+                .map(|v| match v {
+                    redis::Value::BulkString(b) => b.as_slice(),
+                    other => panic!("expected bulk string, got: {other:?}"),
+                })
+                .collect();
+            assert_eq!(popped, vec![b"a", b"b"]);
+        }
+        other => panic!("expected array, got: {other:?}"),
+    }
+
+    // List should be auto-deleted
+    let exists: i64 = redis::cmd("EXISTS").arg("short").query_async(&mut con).await.unwrap();
+    assert_eq!(exists, 0);
+}
+
+#[tokio::test]
+async fn lmpop_empties_list_deletes_key() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("RPUSH")
+        .arg("mylist")
+        .arg("only")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let result: Vec<redis::Value> = redis::cmd("LMPOP")
+        .arg(1)
+        .arg("mylist")
+        .arg("LEFT")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    assert_eq!(result.len(), 2);
+    match &result[1] {
+        redis::Value::Array(arr) => {
+            assert_eq!(arr.len(), 1);
+            match &arr[0] {
+                redis::Value::BulkString(b) => assert_eq!(b, b"only"),
+                other => panic!("expected bulk string, got: {other:?}"),
+            }
+        }
+        other => panic!("expected array, got: {other:?}"),
+    }
+
+    let exists: i64 = redis::cmd("EXISTS").arg("mylist").query_async(&mut con).await.unwrap();
+    assert_eq!(exists, 0);
+}
+
+// ---------------------------------------------------------------------------
 // Cross-type WRONGTYPE enforcement
 // ---------------------------------------------------------------------------
 
@@ -1110,6 +1711,8 @@ async fn wrongtype_list_commands_on_string_key() {
         vec!["LREM", "s", "0", "x"],
         vec!["LINSERT", "s", "BEFORE", "a", "x"],
         vec!["LPOS", "s", "x"],
+        vec!["LMOVE", "s", "other", "LEFT", "RIGHT"],
+        vec!["LMPOP", "1", "s", "LEFT"],
     ] {
         let mut cmd = redis::cmd(cmd_args[0]);
         for arg in &cmd_args[1..] {
@@ -1136,15 +1739,21 @@ async fn arity_errors() {
     let mut con = ctx.connection().await;
 
     for cmd_args in [
-        vec!["LPUSH"],                  // missing key + elements
-        vec!["LPUSH", "k"],             // missing elements
-        vec!["LPOP"],                   // missing key
-        vec!["LPOP", "k", "a", "b"],    // too many args
-        vec!["LLEN"],                   // missing key
-        vec!["LINDEX", "k"],            // missing index
-        vec!["LRANGE", "k", "0"],       // missing stop
-        vec!["LSET", "k", "0"],         // missing value
-        vec!["LINSERT", "k", "BEFORE"], // missing pivot + element
+        vec!["LPUSH"],                       // missing key + elements
+        vec!["LPUSH", "k"],                  // missing elements
+        vec!["LPOP"],                        // missing key
+        vec!["LPOP", "k", "a", "b"],         // too many args
+        vec!["LLEN"],                        // missing key
+        vec!["LINDEX", "k"],                 // missing index
+        vec!["LRANGE", "k", "0"],            // missing stop
+        vec!["LSET", "k", "0"],              // missing value
+        vec!["LINSERT", "k", "BEFORE"],      // missing pivot + element
+        vec!["LMOVE"],                       // missing all args
+        vec!["LMOVE", "src"],                // missing 3 args
+        vec!["LMOVE", "src", "dst", "LEFT"], // missing whereto
+        vec!["LMPOP"],                       // missing all args
+        vec!["LMPOP", "1"],                  // missing key + direction
+        vec!["LMPOP", "1", "k"],             // missing direction
     ] {
         let mut cmd = redis::cmd(cmd_args[0]);
         for arg in &cmd_args[1..] {
