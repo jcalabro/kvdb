@@ -1801,6 +1801,230 @@ async fn run_validate(addr: &str) -> bool {
     let result: redis::RedisResult<i64> = redis::cmd("EXISTS").arg("smoke_list").query_async(&mut con).await;
     t.check_eq("EXISTS=0 after final pop", result, 0);
 
+    // -- Sorted Set Commands --------------------------------------------------
+    println!("Sorted Set Commands");
+
+    // ZADD 4 members
+    let result: redis::RedisResult<i64> = redis::cmd("ZADD")
+        .arg("smoke_zset")
+        .arg("1")
+        .arg("a")
+        .arg("2")
+        .arg("b")
+        .arg("3")
+        .arg("c")
+        .arg("4")
+        .arg("d")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("ZADD 4 members", result, 4);
+
+    // ZCARD
+    let result: redis::RedisResult<i64> = redis::cmd("ZCARD").arg("smoke_zset").query_async(&mut con).await;
+    t.check_eq("ZCARD", result, 4);
+
+    // ZSCORE
+    let result: redis::RedisResult<String> = redis::cmd("ZSCORE")
+        .arg("smoke_zset")
+        .arg("b")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("ZSCORE b", result, "2".to_string());
+
+    // ZRANK / ZREVRANK
+    let result: redis::RedisResult<i64> = redis::cmd("ZRANK")
+        .arg("smoke_zset")
+        .arg("a")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("ZRANK a", result, 0);
+
+    let result: redis::RedisResult<i64> = redis::cmd("ZREVRANK")
+        .arg("smoke_zset")
+        .arg("a")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("ZREVRANK a", result, 3);
+
+    // ZRANGE ascending
+    let result: redis::RedisResult<Vec<String>> = redis::cmd("ZRANGE")
+        .arg("smoke_zset")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await;
+    t.check_eq(
+        "ZRANGE 0 -1 ascending",
+        result,
+        vec!["a".to_string(), "b".into(), "c".into(), "d".into()],
+    );
+
+    // ZREVRANGE descending
+    let result: redis::RedisResult<Vec<String>> = redis::cmd("ZREVRANGE")
+        .arg("smoke_zset")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await;
+    t.check_eq(
+        "ZREVRANGE 0 -1 descending",
+        result,
+        vec!["d".to_string(), "c".into(), "b".into(), "a".into()],
+    );
+
+    // ZRANGEBYSCORE
+    let result: redis::RedisResult<Vec<String>> = redis::cmd("ZRANGEBYSCORE")
+        .arg("smoke_zset")
+        .arg("2")
+        .arg("3")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("ZRANGEBYSCORE 2 3", result, vec!["b".to_string(), "c".into()]);
+
+    // ZCOUNT
+    let result: redis::RedisResult<i64> = redis::cmd("ZCOUNT")
+        .arg("smoke_zset")
+        .arg("-inf")
+        .arg("+inf")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("ZCOUNT -inf +inf", result, 4);
+
+    // ZINCRBY: increment a by 10 -> score becomes 11
+    let result: redis::RedisResult<String> = redis::cmd("ZINCRBY")
+        .arg("smoke_zset")
+        .arg("10")
+        .arg("a")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("ZINCRBY a by 10", result, "11".to_string());
+
+    // ZPOPMIN: now order is b(2), c(3), d(4), a(11) -> pops b at 2
+    let result: redis::RedisResult<Vec<String>> = redis::cmd("ZPOPMIN").arg("smoke_zset").query_async(&mut con).await;
+    t.check_eq("ZPOPMIN pops lowest", result, vec!["b".to_string(), "2".into()]);
+
+    // ZPOPMAX: now order is c(3), d(4), a(11) -> pops a at 11
+    let result: redis::RedisResult<Vec<String>> = redis::cmd("ZPOPMAX").arg("smoke_zset").query_async(&mut con).await;
+    t.check_eq("ZPOPMAX pops highest", result, vec!["a".to_string(), "11".into()]);
+
+    // ZREM: create a new key, remove a member, verify count
+    let _: redis::RedisResult<i64> = redis::cmd("ZADD")
+        .arg("smoke_zset_rem")
+        .arg("1")
+        .arg("x")
+        .arg("2")
+        .arg("y")
+        .arg("3")
+        .arg("z")
+        .query_async(&mut con)
+        .await;
+    let result: redis::RedisResult<i64> = redis::cmd("ZREM")
+        .arg("smoke_zset_rem")
+        .arg("y")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("ZREM y", result, 1);
+
+    let result: redis::RedisResult<i64> = redis::cmd("ZCARD").arg("smoke_zset_rem").query_async(&mut con).await;
+    t.check_eq("ZCARD after ZREM", result, 2);
+
+    // ZREMRANGEBYSCORE
+    let _: redis::RedisResult<i64> = redis::cmd("ZADD")
+        .arg("smoke_zset_rbs")
+        .arg("1")
+        .arg("a")
+        .arg("2")
+        .arg("b")
+        .arg("3")
+        .arg("c")
+        .arg("4")
+        .arg("d")
+        .query_async(&mut con)
+        .await;
+    let result: redis::RedisResult<i64> = redis::cmd("ZREMRANGEBYSCORE")
+        .arg("smoke_zset_rbs")
+        .arg("2")
+        .arg("3")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("ZREMRANGEBYSCORE 2 3", result, 2);
+
+    let result: redis::RedisResult<i64> = redis::cmd("ZCARD").arg("smoke_zset_rbs").query_async(&mut con).await;
+    t.check_eq("ZCARD after ZREMRANGEBYSCORE", result, 2);
+
+    // ZMSCORE with mix of existing and non-existing members
+    // smoke_zset still has c(3) and d(4) after the pops above
+    let result: redis::RedisResult<Vec<redis::Value>> = redis::cmd("ZMSCORE")
+        .arg("smoke_zset")
+        .arg("c")
+        .arg("nonexistent")
+        .arg("d")
+        .query_async(&mut con)
+        .await;
+    match result {
+        Ok(vals) if vals.len() == 3 => {
+            // c should have score 3, nonexistent should be Nil, d should have score 4
+            let c_ok = match &vals[0] {
+                redis::Value::BulkString(b) => b == b"3",
+                _ => false,
+            };
+            let nil_ok = matches!(&vals[1], redis::Value::Nil);
+            let d_ok = match &vals[2] {
+                redis::Value::BulkString(b) => b == b"4",
+                _ => false,
+            };
+            if c_ok && nil_ok && d_ok {
+                t.pass("ZMSCORE mix of existing and nil");
+            } else {
+                t.fail("ZMSCORE mix of existing and nil", &format!("wrong values: {vals:?}"));
+            }
+        }
+        Ok(vals) => t.fail("ZMSCORE mix of existing and nil", &format!("wrong length: {vals:?}")),
+        Err(e) => t.fail("ZMSCORE mix of existing and nil", &format!("error: {e:?}")),
+    }
+
+    // ZRANDMEMBER on single-member set
+    let _: redis::RedisResult<i64> = redis::cmd("DEL").arg("smoke_zset_rand").query_async(&mut con).await;
+    let _: redis::RedisResult<i64> = redis::cmd("ZADD")
+        .arg("smoke_zset_rand")
+        .arg("5")
+        .arg("only")
+        .query_async(&mut con)
+        .await;
+    let result: redis::RedisResult<String> = redis::cmd("ZRANDMEMBER")
+        .arg("smoke_zset_rand")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("ZRANDMEMBER single member", result, "only".to_string());
+
+    // WRONGTYPE: ZADD on string key
+    let _: redis::RedisResult<()> = redis::cmd("SET")
+        .arg("smoke_str_for_zset")
+        .arg("hello")
+        .query_async(&mut con)
+        .await;
+    let result: redis::RedisResult<i64> = redis::cmd("ZADD")
+        .arg("smoke_str_for_zset")
+        .arg("1")
+        .arg("member")
+        .query_async(&mut con)
+        .await;
+    match result {
+        Err(e) if format!("{e}").contains("WRONGTYPE") => t.pass("ZADD WRONGTYPE on string"),
+        Err(e) => t.fail("ZADD WRONGTYPE on string", &format!("wrong error: {e:?}")),
+        Ok(v) => t.fail("ZADD WRONGTYPE on string", &format!("expected error, got: {v}")),
+    }
+
+    // cleanup sorted set keys
+    let _: redis::RedisResult<i64> = redis::cmd("DEL")
+        .arg("smoke_zset")
+        .arg("smoke_zset_rem")
+        .arg("smoke_zset_rbs")
+        .arg("smoke_zset_rand")
+        .arg("smoke_str_for_zset")
+        .query_async(&mut con)
+        .await;
+
     // -- Post-error liveness check ------------------------------------------
     let result: redis::RedisResult<String> = redis::cmd("PING").query_async(&mut con).await;
     t.check_eq("server alive after errors", result, "PONG".to_string());
@@ -1886,8 +2110,12 @@ impl Stats {
 //   LPOP/RPOP     3%    -- list pops
 //   LLEN          1%    -- list length
 //   LRANGE        2%    -- list range reads
+//   ZADD          4%    -- sorted set adds
+//   ZSCORE        2%    -- sorted set score lookups
+//   ZRANGE        2%    -- sorted set range reads
+//   ZREM          2%    -- sorted set removals
 //
-// Total = 110 (weights, not strict %; roll range is 0..110)
+// Total = 120 (weights, not strict %; roll range is 0..120)
 
 /// Pick a random operation and execute it. Returns Ok(()) on success,
 /// or an error string for logging (but we mostly just count errors).
@@ -1904,7 +2132,7 @@ async fn run_one_op(
     rng: &mut StdRng,
     key_space: u32,
 ) -> Result<(), String> {
-    let roll: u32 = rng.gen_range(0..110);
+    let roll: u32 = rng.gen_range(0..120);
 
     // String-value keys (SET/GET/MGET/MSET/SETNX/SETEX/PSETEX/GETDEL/DEL/EXISTS)
     let str_key = format!("lg:s:{}", rng.gen_range(0..key_space));
@@ -1916,6 +2144,8 @@ async fn run_one_op(
     let app_key = format!("lg:a:{}", rng.gen_range(0..key_space));
     // List keys (LPUSH/RPUSH/LPOP/RPOP/LLEN/LRANGE)
     let list_key = format!("lg:l:{}", rng.gen_range(0..key_space / 4));
+    // Sorted set keys (ZADD/ZSCORE/ZRANGE/ZREM)
+    let zset_key = format!("lg:z:{}", rng.gen_range(0..key_space / 4));
 
     match roll {
         // ----- GET (31%) -----
@@ -2224,6 +2454,54 @@ async fn run_one_op(
             .await
             .map(|_| ())
             .map_err(|e| e.to_string()),
+
+        // ----- ZADD (4%) -----
+        110..=113 => {
+            let score: f64 = rng.gen_range(-1000.0..1000.0);
+            let member = format!("m{}", rng.gen_range(0..100));
+            redis::cmd("ZADD")
+                .arg(&zset_key)
+                .arg(score)
+                .arg(&member)
+                .query_async::<i64>(con)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+
+        // ----- ZSCORE (2%) -----
+        114..=115 => {
+            let member = format!("m{}", rng.gen_range(0..100));
+            redis::cmd("ZSCORE")
+                .arg(&zset_key)
+                .arg(&member)
+                .query_async::<redis::Value>(con)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+
+        // ----- ZRANGE (2%) -----
+        116..=117 => redis::cmd("ZRANGE")
+            .arg(&zset_key)
+            .arg(0)
+            .arg(-1)
+            .query_async::<Vec<String>>(con)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+
+        // ----- ZREM (2%) -----
+        118..=119 => {
+            let member = format!("m{}", rng.gen_range(0..100));
+            redis::cmd("ZREM")
+                .arg(&zset_key)
+                .arg(&member)
+                .query_async::<i64>(con)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
 
         _ => unreachable!(),
     }

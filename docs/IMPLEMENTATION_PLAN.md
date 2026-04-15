@@ -12,8 +12,8 @@
 | M5: Key Management & TTL | **Complete** | 18 commands (EXPIRE, PEXPIRE, EXPIREAT, PEXPIREAT, TTL, PTTL, PERSIST, EXPIRETIME, PEXPIRETIME, TYPE, RENAME, RENAMENX, UNLINK, TOUCH, DBSIZE, SELECT, FLUSHDB, FLUSHALL). Background expiry worker (250ms scan, 1000 key batches). NamespaceCache for SELECT. 40 integration tests, 14 acceptance tests. |
 | M6: Hash Commands | **Complete** | 15 commands (HSET, HGET, HDEL, HEXISTS, HLEN, HKEYS, HVALS, HGETALL, HMGET, HMSET, HINCRBY, HINCRBYFLOAT, HSETNX, HSTRLEN, HRANDFIELD). FDB range reads for HGETALL/HKEYS/HVALS. Cardinality tracking via ObjectMeta. 30 integration tests, 9 acceptance tests (property-based + randomized 500-op model checking). |
 | M7: Set Commands | **Complete** | 16 commands (SADD, SREM, SISMEMBER, SMISMEMBER, SCARD, SMEMBERS, SPOP, SRANDMEMBER, SMOVE, SINTER, SUNION, SDIFF, SINTERSTORE, SUNIONSTORE, SDIFFSTORE, SINTERCARD). Direct FDB keys (existence = membership). Parallel existence checks via join_all. Multi-set ops computed in-memory. 37 integration tests, 9 acceptance tests (property-based + randomized model checking). |
-| M8: List Commands | **Complete** | 14 commands (LPUSH, RPUSH, LPOP, RPOP, LLEN, LINDEX, LRANGE, LSET, LTRIM, LREM, LPUSHX, RPUSHX, LINSERT, LPOS). Index-based storage (O(1) push/pop/LINDEX, O(k) LRANGE). Compact-rewrite for LREM/LINSERT. Element size validation (100KB FDB limit). 37 integration tests, 10 acceptance tests (property-based VecDeque model + TTL + WRONGTYPE). 392 total tests, `just test` at ~2s, `just accept` at ~16s. |
-| M9: Sorted Set Commands | Not started | Moved from M8; lists promoted to M8 for implementation-order reasons. |
+| M8: List Commands | **Complete** | 14 commands (LPUSH, RPUSH, LPOP, RPOP, LLEN, LINDEX, LRANGE, LSET, LTRIM, LREM, LPUSHX, RPUSHX, LINSERT, LPOS). Index-based storage (O(1) push/pop/LINDEX, O(k) LRANGE). Compact-rewrite for LREM/LINSERT. Element size validation (100KB FDB limit). 37 integration tests, 10 acceptance tests (property-based VecDeque model + TTL + WRONGTYPE). |
+| M9: Sorted Set Commands | **Complete** | 20 commands, dual-index FDB layout, 60 integration tests, 8 acceptance tests. |
 | M9.5: Cross-Key List Commands | Not started | LMOVE, LMPOP. |
 | M10: Transactions | Not started | |
 | M11: Pub/Sub | Not started | |
@@ -199,6 +199,31 @@ Set members are stored as individual FDB keys with empty values: `set/<redis_key
 **Smoke tests** (`examples/smoke.rs`) — ~30 list validation checks: LPUSH, RPUSH, LLEN, LRANGE, LINDEX, LPOP, RPOP, LSET, LTRIM, LINSERT, LREM, LPOS, LPUSHX, RPUSHX, WRONGTYPE enforcement. Load phase includes list operations (LPUSH/RPUSH/LPOP/RPOP/LLEN/LRANGE at ~10% of workload).
 
 **`just test`**: 392 tests in ~2s. **`just accept`**: 60 acceptance tests in ~16s.
+
+### What's been built (M9)
+
+**Sorted set commands** (`src/commands/sorted_sets.rs`, ~1500 lines) — 20 handlers:
+- **Core**: ZADD (with NX/XX/GT/LT/CH flags), ZREM (variadic), ZSCORE, ZRANK, ZREVRANK, ZCARD (O(1) from cardinality), ZINCRBY
+- **Range queries**: ZRANGE, ZREVRANGE, ZRANGEBYSCORE, ZRANGEBYLEX, ZCOUNT, ZLEXCOUNT
+- **Range removals**: ZREMRANGEBYRANK, ZREMRANGEBYSCORE, ZREMRANGEBYLEX
+- **Pop/random**: ZPOPMIN (with optional count), ZPOPMAX (with optional count), ZRANDMEMBER (positive count = distinct, negative count = allows duplicates, WITHSCORES flag)
+- **Multi-score**: ZMSCORE (bulk score lookup, returns nil for missing members)
+
+**Key design: Dual-index FDB layout** — Each sorted set member is stored in two FDB subspaces:
+- `zset/<key, score, member>` — score-ordered iteration for ZRANGE, ZRANGEBYSCORE, ZPOPMIN/MAX
+- `zset_idx/<key, member>` — O(1) member-to-score lookup for ZSCORE, ZRANK, ZINCRBY
+
+FDB's tuple layer provides order-preserving f64 score encoding, so range scans by score work natively. This differs from the Go alpha's roaring bitmap approach — individual FDB keys per member give better concurrency and eliminate serialization bottlenecks. ObjectMeta tracks cardinality.
+
+**Score/lex range parsing** — Shared helpers parse Redis score range syntax (`-inf`, `+inf`, `(exclusive`, inclusive) and lex range syntax (`-`, `+`, `[inclusive`, `(exclusive`) used across ZRANGEBYSCORE, ZCOUNT, ZLEXCOUNT, ZRANGEBYLEX, ZREMRANGEBYSCORE, ZREMRANGEBYLEX.
+
+**Integration tests** (`tests/sorted_sets.rs`) — 60 tests covering all 20 commands: ZADD/ZSCORE/ZRANK round-trip, ZADD NX/XX/GT/LT/CH flag combinations, negative and floating-point scores, ZRANGE/ZREVRANGE full and partial, ZRANGEBYSCORE inclusive/exclusive/inf bounds, ZRANGEBYLEX ordering, ZCOUNT/ZLEXCOUNT, ZINCRBY on new and existing members, ZPOPMIN/ZPOPMAX single and with count, ZRANDMEMBER positive/negative count with WITHSCORES, ZMSCORE with mix of existing and missing, ZREMRANGEBYRANK/ZREMRANGEBYSCORE/ZREMRANGEBYLEX, WRONGTYPE enforcement, arity errors.
+
+**Acceptance tests** (`tests/accept_sorted_sets.rs`) — 8 tests: ZADD/ZSCORE round-trip property (100 cases), ZRANK + ZREVRANK == ZCARD - 1 property (50 cases), ZRANGE always sorted property (50 cases), randomized ZADD/ZREM/ZSCORE/ZRANGE sequences against BTreeMap model (30 cases), large sorted set with 1K members, lazy expiry integration, ZADD on expired string creates new sorted set, WRONGTYPE sorted set vs hash cross-type.
+
+**Smoke tests** (`examples/smoke.rs`) — 19 sorted set validation checks: ZADD, ZCARD, ZSCORE, ZRANK, ZREVRANK, ZRANGE, ZREVRANGE, ZRANGEBYSCORE, ZCOUNT, ZINCRBY, ZPOPMIN, ZPOPMAX, ZREM, ZREMRANGEBYSCORE, ZMSCORE, ZRANDMEMBER, WRONGTYPE enforcement. Load phase includes sorted set operations (ZADD/ZSCORE/ZRANGE/ZREM at ~10% of workload).
+
+**`just test`**: 486 tests in ~2s. **`just accept`**: 68 acceptance tests in ~17s.
 
 ---
 
