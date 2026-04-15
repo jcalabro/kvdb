@@ -1684,6 +1684,326 @@ async fn lmpop_empties_list_deletes_key() {
 }
 
 // ---------------------------------------------------------------------------
+// LMOVE same-key same-direction (identity rotation)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn lmove_same_key_left_left_identity() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("RPUSH")
+        .arg("mylist")
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // LEFT LEFT on same key: pop head, push head = no-op on list order.
+    let moved: String = redis::cmd("LMOVE")
+        .arg("mylist")
+        .arg("mylist")
+        .arg("LEFT")
+        .arg("LEFT")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(moved, "a");
+
+    let got: Vec<String> = redis::cmd("LRANGE")
+        .arg("mylist")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(got, vec!["a", "b", "c"]);
+}
+
+#[tokio::test]
+async fn lmove_same_key_right_right_identity() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("RPUSH")
+        .arg("mylist")
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // RIGHT RIGHT on same key: pop tail, push tail = no-op on list order.
+    let moved: String = redis::cmd("LMOVE")
+        .arg("mylist")
+        .arg("mylist")
+        .arg("RIGHT")
+        .arg("RIGHT")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(moved, "c");
+
+    let got: Vec<String> = redis::cmd("LRANGE")
+        .arg("mylist")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(got, vec!["a", "b", "c"]);
+}
+
+// ---------------------------------------------------------------------------
+// LMOVE same-key single-element edge case
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn lmove_same_key_single_element() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("RPUSH")
+        .arg("mylist")
+        .arg("only")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // Single element same-key rotation: pop the only element, push it back.
+    let moved: String = redis::cmd("LMOVE")
+        .arg("mylist")
+        .arg("mylist")
+        .arg("LEFT")
+        .arg("RIGHT")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(moved, "only");
+
+    let got: Vec<String> = redis::cmd("LRANGE")
+        .arg("mylist")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(got, vec!["only"]);
+
+    // Key should still exist.
+    let exists: i64 = redis::cmd("EXISTS").arg("mylist").query_async(&mut con).await.unwrap();
+    assert_eq!(exists, 1);
+}
+
+// ---------------------------------------------------------------------------
+// LMOVE pushes to existing destination (RIGHT side)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn lmove_pushes_to_existing_destination_right() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("RPUSH")
+        .arg("src")
+        .arg("x")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let _: i64 = redis::cmd("RPUSH")
+        .arg("dst")
+        .arg("a")
+        .arg("b")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let moved: String = redis::cmd("LMOVE")
+        .arg("src")
+        .arg("dst")
+        .arg("LEFT")
+        .arg("RIGHT")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(moved, "x");
+
+    let dst: Vec<String> = redis::cmd("LRANGE")
+        .arg("dst")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(dst, vec!["a", "b", "x"]);
+}
+
+// ---------------------------------------------------------------------------
+// LMOVE destination WRONGTYPE enforcement
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn lmove_destination_wrongtype() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // Source is a valid list.
+    let _: i64 = redis::cmd("RPUSH")
+        .arg("src")
+        .arg("a")
+        .arg("b")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // Destination is a string — should cause WRONGTYPE.
+    let _: () = redis::cmd("SET")
+        .arg("dst")
+        .arg("hello")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let result: redis::RedisResult<String> = redis::cmd("LMOVE")
+        .arg("src")
+        .arg("dst")
+        .arg("LEFT")
+        .arg("RIGHT")
+        .query_async(&mut con)
+        .await;
+    assert!(result.is_err(), "LMOVE to string dst should fail");
+    let err = format!("{}", result.unwrap_err());
+    assert!(err.contains("WRONGTYPE"), "expected WRONGTYPE, got {err}");
+
+    // Source should be unmodified (atomicity).
+    let src: Vec<String> = redis::cmd("LRANGE")
+        .arg("src")
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(src, vec!["a", "b"]);
+}
+
+// ---------------------------------------------------------------------------
+// LMPOP WRONGTYPE on a non-first key
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn lmpop_wrongtype_on_second_key() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // key1 does not exist. key2 is a string (wrong type).
+    let _: () = redis::cmd("SET")
+        .arg("key2")
+        .arg("hello")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let result: redis::RedisResult<redis::Value> = redis::cmd("LMPOP")
+        .arg(2)
+        .arg("key1")
+        .arg("key2")
+        .arg("LEFT")
+        .query_async(&mut con)
+        .await;
+    assert!(result.is_err(), "LMPOP with wrong-type key should fail");
+    let err = format!("{}", result.unwrap_err());
+    assert!(err.contains("WRONGTYPE"), "expected WRONGTYPE, got {err}");
+}
+
+// ---------------------------------------------------------------------------
+// LMOVE / LMPOP invalid direction strings
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn lmove_invalid_direction() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("RPUSH")
+        .arg("src")
+        .arg("a")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // Invalid source direction.
+    let result: redis::RedisResult<String> = redis::cmd("LMOVE")
+        .arg("src")
+        .arg("dst")
+        .arg("UP")
+        .arg("LEFT")
+        .query_async(&mut con)
+        .await;
+    assert!(result.is_err(), "LMOVE with invalid direction should fail");
+
+    // Invalid destination direction.
+    let result: redis::RedisResult<String> = redis::cmd("LMOVE")
+        .arg("src")
+        .arg("dst")
+        .arg("LEFT")
+        .arg("DOWN")
+        .query_async(&mut con)
+        .await;
+    assert!(result.is_err(), "LMOVE with invalid dst direction should fail");
+}
+
+#[tokio::test]
+async fn lmpop_invalid_direction() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let result: redis::RedisResult<redis::Value> = redis::cmd("LMPOP")
+        .arg(1)
+        .arg("mylist")
+        .arg("UP")
+        .query_async(&mut con)
+        .await;
+    assert!(result.is_err(), "LMPOP with invalid direction should fail");
+}
+
+// ---------------------------------------------------------------------------
+// LMPOP error edge cases
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn lmpop_negative_numkeys() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let result: redis::RedisResult<redis::Value> = redis::cmd("LMPOP")
+        .arg(-1)
+        .arg("k")
+        .arg("LEFT")
+        .query_async(&mut con)
+        .await;
+    assert!(result.is_err(), "LMPOP with negative numkeys should fail");
+}
+
+#[tokio::test]
+async fn lmpop_count_zero() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let result: redis::RedisResult<redis::Value> = redis::cmd("LMPOP")
+        .arg(1)
+        .arg("k")
+        .arg("LEFT")
+        .arg("COUNT")
+        .arg(0)
+        .query_async(&mut con)
+        .await;
+    assert!(result.is_err(), "LMPOP with COUNT 0 should fail");
+}
+
+// ---------------------------------------------------------------------------
 // Cross-type WRONGTYPE enforcement
 // ---------------------------------------------------------------------------
 
@@ -1739,21 +2059,22 @@ async fn arity_errors() {
     let mut con = ctx.connection().await;
 
     for cmd_args in [
-        vec!["LPUSH"],                       // missing key + elements
-        vec!["LPUSH", "k"],                  // missing elements
-        vec!["LPOP"],                        // missing key
-        vec!["LPOP", "k", "a", "b"],         // too many args
-        vec!["LLEN"],                        // missing key
-        vec!["LINDEX", "k"],                 // missing index
-        vec!["LRANGE", "k", "0"],            // missing stop
-        vec!["LSET", "k", "0"],              // missing value
-        vec!["LINSERT", "k", "BEFORE"],      // missing pivot + element
-        vec!["LMOVE"],                       // missing all args
-        vec!["LMOVE", "src"],                // missing 3 args
-        vec!["LMOVE", "src", "dst", "LEFT"], // missing whereto
-        vec!["LMPOP"],                       // missing all args
-        vec!["LMPOP", "1"],                  // missing key + direction
-        vec!["LMPOP", "1", "k"],             // missing direction
+        vec!["LPUSH"],                                     // missing key + elements
+        vec!["LPUSH", "k"],                                // missing elements
+        vec!["LPOP"],                                      // missing key
+        vec!["LPOP", "k", "a", "b"],                       // too many args
+        vec!["LLEN"],                                      // missing key
+        vec!["LINDEX", "k"],                               // missing index
+        vec!["LRANGE", "k", "0"],                          // missing stop
+        vec!["LSET", "k", "0"],                            // missing value
+        vec!["LINSERT", "k", "BEFORE"],                    // missing pivot + element
+        vec!["LMOVE"],                                     // missing all args
+        vec!["LMOVE", "src"],                              // missing 3 args
+        vec!["LMOVE", "src", "dst", "LEFT"],               // missing whereto
+        vec!["LMOVE", "src", "dst", "LEFT", "RIGHT", "x"], // too many args
+        vec!["LMPOP"],                                     // missing all args
+        vec!["LMPOP", "1"],                                // missing key + direction
+        vec!["LMPOP", "1", "k"],                           // missing direction
     ] {
         let mut cmd = redis::cmd(cmd_args[0]);
         for arg in &cmd_args[1..] {
