@@ -91,6 +91,21 @@ impl ObjectMeta {
         }
     }
 
+    /// Create metadata for a new set key.
+    pub fn new_set(cardinality: u64) -> Self {
+        Self {
+            key_type: KeyType::Set,
+            num_chunks: 0,
+            size_bytes: 0,
+            expires_at_ms: 0,
+            cardinality,
+            last_accessed_ms: 0,
+            list_head: 0,
+            list_tail: 0,
+            list_length: 0,
+        }
+    }
+
     /// Create metadata for a new hash key.
     pub fn new_hash(cardinality: u64) -> Self {
         Self {

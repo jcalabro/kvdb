@@ -1311,6 +1311,243 @@ async fn run_validate(addr: &str) -> bool {
         .await;
     t.check_eq("HMSET", result, "OK".to_string());
 
+    // -- Set Commands ---------------------------------------------------------
+    println!("Set Commands");
+
+    let result: redis::RedisResult<i64> = redis::cmd("SADD")
+        .arg("smoke_set")
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("SADD multi-member", result, 3);
+
+    let result: redis::RedisResult<i64> = redis::cmd("SADD")
+        .arg("smoke_set")
+        .arg("a")
+        .arg("d")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("SADD partial overlap", result, 1);
+
+    let result: redis::RedisResult<i64> = redis::cmd("SCARD").arg("smoke_set").query_async(&mut con).await;
+    t.check_eq("SCARD", result, 4);
+
+    let result: redis::RedisResult<i64> = redis::cmd("SISMEMBER")
+        .arg("smoke_set")
+        .arg("b")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("SISMEMBER exists", result, 1);
+
+    let result: redis::RedisResult<i64> = redis::cmd("SISMEMBER")
+        .arg("smoke_set")
+        .arg("z")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("SISMEMBER missing", result, 0);
+
+    let result: redis::RedisResult<Vec<i64>> = redis::cmd("SMISMEMBER")
+        .arg("smoke_set")
+        .arg("a")
+        .arg("z")
+        .arg("c")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("SMISMEMBER", result, vec![1, 0, 1]);
+
+    let result: redis::RedisResult<Vec<String>> = redis::cmd("SMEMBERS").arg("smoke_set").query_async(&mut con).await;
+    match result {
+        Ok(mut members) => {
+            members.sort();
+            if members == vec!["a", "b", "c", "d"] {
+                t.pass("SMEMBERS");
+            } else {
+                t.fail("SMEMBERS", &format!("wrong members: {members:?}"));
+            }
+        }
+        Err(e) => t.fail("SMEMBERS", &format!("error: {e:?}")),
+    }
+
+    let result: redis::RedisResult<i64> = redis::cmd("SREM")
+        .arg("smoke_set")
+        .arg("d")
+        .arg("z")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("SREM", result, 1);
+
+    let result: redis::RedisResult<i64> = redis::cmd("SCARD").arg("smoke_set").query_async(&mut con).await;
+    t.check_eq("SCARD after SREM", result, 3);
+
+    // SPOP: pop one member and verify it was removed.
+    let result: redis::RedisResult<String> = redis::cmd("SPOP").arg("smoke_set").query_async(&mut con).await;
+    match result {
+        Ok(member) if ["a", "b", "c"].contains(&member.as_str()) => {
+            t.pass("SPOP");
+        }
+        Ok(member) => t.fail("SPOP", &format!("unexpected member: {member}")),
+        Err(e) => t.fail("SPOP", &format!("error: {e:?}")),
+    }
+
+    let result: redis::RedisResult<i64> = redis::cmd("SCARD").arg("smoke_set").query_async(&mut con).await;
+    t.check_eq("SCARD after SPOP", result, 2);
+
+    // SRANDMEMBER: should return a member without removing it.
+    let result: redis::RedisResult<String> = redis::cmd("SRANDMEMBER").arg("smoke_set").query_async(&mut con).await;
+    match result {
+        Ok(_member) => t.pass("SRANDMEMBER"),
+        Err(e) => t.fail("SRANDMEMBER", &format!("error: {e:?}")),
+    }
+
+    let result: redis::RedisResult<i64> = redis::cmd("SCARD").arg("smoke_set").query_async(&mut con).await;
+    t.check_eq("SCARD after SRANDMEMBER (unchanged)", result, 2);
+
+    // SMOVE
+    let _: redis::RedisResult<i64> = redis::cmd("SADD")
+        .arg("smoke_src")
+        .arg("x")
+        .arg("y")
+        .query_async(&mut con)
+        .await;
+    let result: redis::RedisResult<i64> = redis::cmd("SMOVE")
+        .arg("smoke_src")
+        .arg("smoke_dst")
+        .arg("x")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("SMOVE", result, 1);
+
+    let result: redis::RedisResult<i64> = redis::cmd("SISMEMBER")
+        .arg("smoke_dst")
+        .arg("x")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("SMOVE destination has member", result, 1);
+
+    // SINTER / SUNION / SDIFF
+    let _: redis::RedisResult<i64> = redis::cmd("SADD")
+        .arg("smoke_a")
+        .arg("1")
+        .arg("2")
+        .arg("3")
+        .query_async(&mut con)
+        .await;
+    let _: redis::RedisResult<i64> = redis::cmd("SADD")
+        .arg("smoke_b")
+        .arg("2")
+        .arg("3")
+        .arg("4")
+        .query_async(&mut con)
+        .await;
+
+    let result: redis::RedisResult<Vec<String>> = redis::cmd("SINTER")
+        .arg("smoke_a")
+        .arg("smoke_b")
+        .query_async(&mut con)
+        .await;
+    match result {
+        Ok(mut members) => {
+            members.sort();
+            if members == vec!["2", "3"] {
+                t.pass("SINTER");
+            } else {
+                t.fail("SINTER", &format!("wrong result: {members:?}"));
+            }
+        }
+        Err(e) => t.fail("SINTER", &format!("error: {e:?}")),
+    }
+
+    let result: redis::RedisResult<Vec<String>> = redis::cmd("SUNION")
+        .arg("smoke_a")
+        .arg("smoke_b")
+        .query_async(&mut con)
+        .await;
+    match result {
+        Ok(mut members) => {
+            members.sort();
+            if members == vec!["1", "2", "3", "4"] {
+                t.pass("SUNION");
+            } else {
+                t.fail("SUNION", &format!("wrong result: {members:?}"));
+            }
+        }
+        Err(e) => t.fail("SUNION", &format!("error: {e:?}")),
+    }
+
+    let result: redis::RedisResult<Vec<String>> = redis::cmd("SDIFF")
+        .arg("smoke_a")
+        .arg("smoke_b")
+        .query_async(&mut con)
+        .await;
+    match result {
+        Ok(members) if members == vec!["1".to_string()] => t.pass("SDIFF"),
+        Ok(members) => t.fail("SDIFF", &format!("wrong result: {members:?}")),
+        Err(e) => t.fail("SDIFF", &format!("error: {e:?}")),
+    }
+
+    // SINTERSTORE / SUNIONSTORE / SDIFFSTORE
+    let result: redis::RedisResult<i64> = redis::cmd("SINTERSTORE")
+        .arg("smoke_inter_dest")
+        .arg("smoke_a")
+        .arg("smoke_b")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("SINTERSTORE", result, 2);
+
+    let result: redis::RedisResult<i64> = redis::cmd("SUNIONSTORE")
+        .arg("smoke_union_dest")
+        .arg("smoke_a")
+        .arg("smoke_b")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("SUNIONSTORE", result, 4);
+
+    let result: redis::RedisResult<i64> = redis::cmd("SDIFFSTORE")
+        .arg("smoke_diff_dest")
+        .arg("smoke_a")
+        .arg("smoke_b")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("SDIFFSTORE", result, 1);
+
+    // SINTERCARD
+    let result: redis::RedisResult<i64> = redis::cmd("SINTERCARD")
+        .arg(2)
+        .arg("smoke_a")
+        .arg("smoke_b")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("SINTERCARD", result, 2);
+
+    let result: redis::RedisResult<i64> = redis::cmd("SINTERCARD")
+        .arg(2)
+        .arg("smoke_a")
+        .arg("smoke_b")
+        .arg("LIMIT")
+        .arg(1)
+        .query_async(&mut con)
+        .await;
+    t.check_eq("SINTERCARD LIMIT", result, 1);
+
+    // WRONGTYPE: SADD on string key
+    let _: redis::RedisResult<()> = redis::cmd("SET")
+        .arg("smoke_str_for_set")
+        .arg("hello")
+        .query_async(&mut con)
+        .await;
+    let result: redis::RedisResult<i64> = redis::cmd("SADD")
+        .arg("smoke_str_for_set")
+        .arg("member")
+        .query_async(&mut con)
+        .await;
+    match result {
+        Err(e) if format!("{e}").contains("WRONGTYPE") => t.pass("SADD WRONGTYPE on string"),
+        Err(e) => t.fail("SADD WRONGTYPE on string", &format!("wrong error: {e:?}")),
+        Ok(v) => t.fail("SADD WRONGTYPE on string", &format!("expected error, got: {v}")),
+    }
+
     // -- Post-error liveness check ------------------------------------------
     let result: redis::RedisResult<String> = redis::cmd("PING").query_async(&mut con).await;
     t.check_eq("server alive after errors", result, "PONG".to_string());

@@ -7,6 +7,7 @@
 
 pub mod hashes;
 pub mod keys;
+pub mod sets;
 pub mod strings;
 pub(crate) mod util;
 
@@ -105,6 +106,22 @@ pub async fn dispatch(cmd: &RedisCommand, state: &mut ConnectionState) -> Comman
         b"HSETNX" => CommandResponse::Reply(hashes::handle_hsetnx(&cmd.args, state).await),
         b"HSTRLEN" => CommandResponse::Reply(hashes::handle_hstrlen(&cmd.args, state).await),
         b"HRANDFIELD" => CommandResponse::Reply(hashes::handle_hrandfield(&cmd.args, state).await),
+        b"SADD" => CommandResponse::Reply(sets::handle_sadd(&cmd.args, state).await),
+        b"SREM" => CommandResponse::Reply(sets::handle_srem(&cmd.args, state).await),
+        b"SISMEMBER" => CommandResponse::Reply(sets::handle_sismember(&cmd.args, state).await),
+        b"SMISMEMBER" => CommandResponse::Reply(sets::handle_smismember(&cmd.args, state).await),
+        b"SCARD" => CommandResponse::Reply(sets::handle_scard(&cmd.args, state).await),
+        b"SMEMBERS" => CommandResponse::Reply(sets::handle_smembers(&cmd.args, state).await),
+        b"SPOP" => CommandResponse::Reply(sets::handle_spop(&cmd.args, state).await),
+        b"SRANDMEMBER" => CommandResponse::Reply(sets::handle_srandmember(&cmd.args, state).await),
+        b"SMOVE" => CommandResponse::Reply(sets::handle_smove(&cmd.args, state).await),
+        b"SINTER" => CommandResponse::Reply(sets::handle_sinter(&cmd.args, state).await),
+        b"SUNION" => CommandResponse::Reply(sets::handle_sunion(&cmd.args, state).await),
+        b"SDIFF" => CommandResponse::Reply(sets::handle_sdiff(&cmd.args, state).await),
+        b"SINTERSTORE" => CommandResponse::Reply(sets::handle_sinterstore(&cmd.args, state).await),
+        b"SUNIONSTORE" => CommandResponse::Reply(sets::handle_sunionstore(&cmd.args, state).await),
+        b"SDIFFSTORE" => CommandResponse::Reply(sets::handle_sdiffstore(&cmd.args, state).await),
+        b"SINTERCARD" => CommandResponse::Reply(sets::handle_sintercard(&cmd.args, state).await),
         _ => {
             let name_str = sanitize_for_error(&cmd.name);
             let mut msg = format!("ERR unknown command '{name_str}', with args beginning with:");

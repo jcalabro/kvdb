@@ -11,7 +11,7 @@
 | M4: String Commands | **Complete** | 19 commands (GET, SET, MGET, MSET, DEL, EXISTS, INCR, DECR, INCRBY, DECRBY, INCRBYFLOAT, APPEND, STRLEN, GETRANGE, SETRANGE, SETNX, SETEX, PSETEX, GETDEL). Full SET flags (NX/XX/EX/PX/EXAT/PXAT/KEEPTTL/GET). Async dispatch, FDB-backed ConnectionState, storage helpers module. 65 integration tests, 7 acceptance tests (property-based + randomized), expanded smoke tests, 5 string benchmarks. 222 total tests, `just test` at ~0.7s, `just accept` at ~4s. |
 | M5: Key Management & TTL | **Complete** | 18 commands (EXPIRE, PEXPIRE, EXPIREAT, PEXPIREAT, TTL, PTTL, PERSIST, EXPIRETIME, PEXPIRETIME, TYPE, RENAME, RENAMENX, UNLINK, TOUCH, DBSIZE, SELECT, FLUSHDB, FLUSHALL). Background expiry worker (250ms scan, 1000 key batches). NamespaceCache for SELECT. 40 integration tests, 14 acceptance tests. |
 | M6: Hash Commands | **Complete** | 15 commands (HSET, HGET, HDEL, HEXISTS, HLEN, HKEYS, HVALS, HGETALL, HMGET, HMSET, HINCRBY, HINCRBYFLOAT, HSETNX, HSTRLEN, HRANDFIELD). FDB range reads for HGETALL/HKEYS/HVALS. Cardinality tracking via ObjectMeta. 30 integration tests, 9 acceptance tests (property-based + randomized 500-op model checking). |
-| M7: Set Commands | Not started | |
+| M7: Set Commands | **Complete** | 16 commands (SADD, SREM, SISMEMBER, SMISMEMBER, SCARD, SMEMBERS, SPOP, SRANDMEMBER, SMOVE, SINTER, SUNION, SDIFF, SINTERSTORE, SUNIONSTORE, SDIFFSTORE, SINTERCARD). Direct FDB keys (existence = membership). Parallel existence checks via join_all. Multi-set ops computed in-memory. 37 integration tests, 9 acceptance tests (property-based + randomized model checking). |
 | M8: Sorted Set Commands | Not started | |
 | M9: List Commands | Not started | |
 | M10: Transactions | Not started | |
@@ -140,6 +140,40 @@ SET flag parsing validates all mutual exclusions. TTL computation happens inside
 **Acceptance tests** (`tests/accept_keys.rs`) — 14 tests: TTL/EXPIRETIME property tests (100 cases), SELECT isolation with randomized cross-namespace operations (50 cases), FLUSHDB/FLUSHALL correctness, DBSIZE accuracy after randomized SET/DEL sequences (200 cases), RENAME/RENAMENX property tests, randomized key lifecycle sequences (EXPIRE/PERSIST/TYPE/DEL/TOUCH interleaved, verified against in-memory model, 500 ops).
 
 **`just test`**: 253 tests in ~0.8s. **`just accept`**: 31 acceptance tests in ~5.7s.
+
+### What's been built (M6)
+
+**Hash commands** (`src/commands/hashes.rs`, ~1050 lines) — 15 handlers:
+- **Core**: HSET (variadic field-value pairs), HGET, HDEL (variadic), HEXISTS, HLEN (O(1) from cardinality)
+- **Bulk reads**: HGETALL, HKEYS, HVALS (paginated FDB range reads), HMGET (parallel lookups via join_all)
+- **Mutations**: HINCRBY (checked overflow), HINCRBYFLOAT (NaN/Inf protection, Redis float formatting), HSETNX (conditional set)
+- **Utilities**: HSTRLEN (field value length), HRANDFIELD (positive count = distinct, negative count = duplicates, WITHVALUES flag), HMSET (deprecated alias)
+
+Hash fields are stored as individual FDB key-value pairs: `hash/<redis_key, field_name> -> field_value`. ObjectMeta tracks cardinality (field count). Parallel existence checks via `join_all` for multi-field operations. `read_hash_fields()` helper handles paginated range reads.
+
+**Integration tests** (`tests/hashes.rs`) — 30 tests covering all 15 commands: HSET/HGET round-trip, multi-field operations, cardinality tracking, WRONGTYPE enforcement, HRANDFIELD count modes, HINCRBY overflow, HINCRBYFLOAT edge cases.
+
+**Acceptance tests** (`tests/accept_hashes.rs`) — 9 tests: HSET/HGET round-trip property (100 cases), HLEN matches distinct field count (50 cases), HLEN/HKEYS/HVALS consistency (50 cases), HGETALL with 100 fields, HINCRBY commutativity (50 cases), randomized 500-op hash operations against HashMap model (30 cases), lazy expiry integration, HSET on expired hash, WRONGTYPE cross-type matrix.
+
+**`just test`**: 291 tests in ~1.3s. **`just accept`**: 40 acceptance tests in ~8.5s.
+
+### What's been built (M7)
+
+**Set commands** (`src/commands/sets.rs`, ~650 lines) — 16 handlers:
+- **Core**: SADD (variadic, deduplicates within call), SREM (variadic), SISMEMBER, SMISMEMBER (parallel lookups), SCARD (O(1) from cardinality), SMEMBERS (paginated range read)
+- **Random selection**: SPOP (with optional count), SRANDMEMBER (positive count = distinct, negative count = allows duplicates)
+- **Multi-set**: SINTER, SUNION, SDIFF (load all sets into HashSet, compute in-memory), SINTERSTORE, SUNIONSTORE, SDIFFSTORE (compute + write result to destination)
+- **Utilities**: SMOVE (atomic move between sets), SINTERCARD (with LIMIT short-circuit)
+
+Set members are stored as individual FDB keys with empty values: `set/<redis_key, member> -> b""`. Membership is determined by key existence — no value payload needed. This differs from the Go MVP's roaring bitmap approach but better fits FDB's strengths: no serialization bottleneck, better concurrency (each member is an independent key), simpler code. ObjectMeta tracks cardinality. Shared helpers: `read_set_members()` (paginated range read), `read_set_meta_for_write()` (type check + expired cleanup), `read_set_meta_for_read()` (type check only). Multi-set operations use `multi_set_op()` generic over the set operation function.
+
+**Integration tests** (`tests/sets.rs`) — 37 tests covering all 16 commands: SADD/SISMEMBER/SREM round-trip, duplicate deduplication within SADD, SCARD after add/remove, SMEMBERS enumeration, SPOP removal + cardinality, SRANDMEMBER with positive/negative count, SMOVE between sets, SINTER/SUNION/SDIFF correctness, store variants overwrite existing keys, SINTERCARD with LIMIT, WRONGTYPE enforcement, TTL preservation.
+
+**Acceptance tests** (`tests/accept_sets.rs`) — 9 tests: SADD/SISMEMBER round-trip property (100 cases), SCARD monotonicity (50 cases), SINTER commutativity (50 cases), SUNION superset property (50 cases), randomized SADD/SREM sequences against HashSet model (30 cases), multi-set ops (SINTER/SUNION/SDIFF) against model (30 cases), large set with 1K members, WRONGTYPE cross-type matrix (set vs hash).
+
+**Smoke tests** (`examples/smoke.rs`) — ~30 set validation checks: SADD, SCARD, SISMEMBER, SMISMEMBER, SMEMBERS, SREM, SPOP, SRANDMEMBER, SMOVE, SINTER, SUNION, SDIFF, SINTERSTORE, SUNIONSTORE, SDIFFSTORE, SINTERCARD (with LIMIT), WRONGTYPE enforcement.
+
+**`just test`**: 333 tests in ~1.3s. **`just accept`**: 49 acceptance tests in ~10.5s.
 
 ---
 
