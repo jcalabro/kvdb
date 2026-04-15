@@ -1044,3 +1044,276 @@ async fn zlexcount_basic() {
         .unwrap();
     assert_eq!(count, 3); // b, c, d
 }
+
+// ---------------------------------------------------------------------------
+// ZRANGEBYSCORE
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn zrangebyscore_basic() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("a")
+        .arg(2.0)
+        .arg("b")
+        .arg(3.0)
+        .arg("c")
+        .arg(4.0)
+        .arg("d")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let members: Vec<String> = redis::cmd("ZRANGEBYSCORE")
+        .arg("myzset")
+        .arg(2)
+        .arg(3)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(members, vec!["b", "c"]);
+}
+
+#[tokio::test]
+async fn zrangebyscore_inf() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("a")
+        .arg(2.0)
+        .arg("b")
+        .arg(3.0)
+        .arg("c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let members: Vec<String> = redis::cmd("ZRANGEBYSCORE")
+        .arg("myzset")
+        .arg("-inf")
+        .arg("+inf")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(members, vec!["a", "b", "c"]);
+}
+
+#[tokio::test]
+async fn zrangebyscore_exclusive() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("a")
+        .arg(2.0)
+        .arg("b")
+        .arg(3.0)
+        .arg("c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let members: Vec<String> = redis::cmd("ZRANGEBYSCORE")
+        .arg("myzset")
+        .arg("(1")
+        .arg("(3")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(members, vec!["b"]); // Only score 2.
+}
+
+#[tokio::test]
+async fn zrangebyscore_withscores() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("a")
+        .arg(2.0)
+        .arg("b")
+        .arg(3.0)
+        .arg("c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let result: Vec<String> = redis::cmd("ZRANGEBYSCORE")
+        .arg("myzset")
+        .arg(1)
+        .arg(2)
+        .arg("WITHSCORES")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(result, vec!["a", "1", "b", "2"]);
+}
+
+#[tokio::test]
+async fn zrangebyscore_limit() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(1.0)
+        .arg("a")
+        .arg(2.0)
+        .arg("b")
+        .arg(3.0)
+        .arg("c")
+        .arg(4.0)
+        .arg("d")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let members: Vec<String> = redis::cmd("ZRANGEBYSCORE")
+        .arg("myzset")
+        .arg("-inf")
+        .arg("+inf")
+        .arg("LIMIT")
+        .arg(1)
+        .arg(2)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(members, vec!["b", "c"]); // Skip 1, take 2.
+}
+
+// ---------------------------------------------------------------------------
+// ZRANGEBYLEX
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn zrangebylex_basic() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // All same score for meaningful lex ordering.
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(0.0)
+        .arg("a")
+        .arg(0.0)
+        .arg("b")
+        .arg(0.0)
+        .arg("c")
+        .arg(0.0)
+        .arg("d")
+        .arg(0.0)
+        .arg("e")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let members: Vec<String> = redis::cmd("ZRANGEBYLEX")
+        .arg("myzset")
+        .arg("[b")
+        .arg("[d")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(members, vec!["b", "c", "d"]);
+}
+
+#[tokio::test]
+async fn zrangebylex_exclusive() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(0.0)
+        .arg("a")
+        .arg(0.0)
+        .arg("b")
+        .arg(0.0)
+        .arg("c")
+        .arg(0.0)
+        .arg("d")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let members: Vec<String> = redis::cmd("ZRANGEBYLEX")
+        .arg("myzset")
+        .arg("(a")
+        .arg("(d")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(members, vec!["b", "c"]);
+}
+
+#[tokio::test]
+async fn zrangebylex_all() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(0.0)
+        .arg("a")
+        .arg(0.0)
+        .arg("b")
+        .arg(0.0)
+        .arg("c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let members: Vec<String> = redis::cmd("ZRANGEBYLEX")
+        .arg("myzset")
+        .arg("-")
+        .arg("+")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(members, vec!["a", "b", "c"]);
+}
+
+#[tokio::test]
+async fn zrangebylex_limit() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("ZADD")
+        .arg("myzset")
+        .arg(0.0)
+        .arg("a")
+        .arg(0.0)
+        .arg("b")
+        .arg(0.0)
+        .arg("c")
+        .arg(0.0)
+        .arg("d")
+        .arg(0.0)
+        .arg("e")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let members: Vec<String> = redis::cmd("ZRANGEBYLEX")
+        .arg("myzset")
+        .arg("-")
+        .arg("+")
+        .arg("LIMIT")
+        .arg(1)
+        .arg(2)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(members, vec!["b", "c"]); // Skip 1, take 2.
+}

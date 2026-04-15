@@ -1034,6 +1034,234 @@ pub async fn handle_zlexcount(args: &[Bytes], state: &ConnectionState) -> RespVa
 }
 
 // ---------------------------------------------------------------------------
+// ZRANGEBYSCORE key min max [WITHSCORES] [LIMIT offset count]
+// ---------------------------------------------------------------------------
+
+/// Parse optional WITHSCORES and LIMIT flags from trailing arguments.
+///
+/// Returns `(withscores, offset, count)` where offset/count default to 0/i64::MAX
+/// (meaning "no limit").
+fn parse_range_options(args: &[Bytes], start_idx: usize) -> Result<(bool, usize, usize), CommandError> {
+    let mut withscores = false;
+    let mut offset: usize = 0;
+    let mut count: usize = usize::MAX;
+
+    let mut i = start_idx;
+    while i < args.len() {
+        let upper = args[i].to_ascii_uppercase();
+        match upper.as_slice() {
+            b"WITHSCORES" => {
+                withscores = true;
+                i += 1;
+            }
+            b"LIMIT" => {
+                if i + 2 >= args.len() {
+                    return Err(CommandError::Generic("ERR syntax error".into()));
+                }
+                let off_str = std::str::from_utf8(&args[i + 1])
+                    .map_err(|_| CommandError::Generic("ERR value is not an integer or out of range".into()))?;
+                let cnt_str = std::str::from_utf8(&args[i + 2])
+                    .map_err(|_| CommandError::Generic("ERR value is not an integer or out of range".into()))?;
+                offset = off_str
+                    .parse::<i64>()
+                    .map_err(|_| CommandError::Generic("ERR value is not an integer or out of range".into()))?
+                    as usize;
+                let raw_count = cnt_str
+                    .parse::<i64>()
+                    .map_err(|_| CommandError::Generic("ERR value is not an integer or out of range".into()))?;
+                // Negative count means "all remaining" per Redis behavior.
+                count = if raw_count < 0 { usize::MAX } else { raw_count as usize };
+                i += 3;
+            }
+            _ => {
+                return Err(CommandError::Generic("ERR syntax error".into()));
+            }
+        }
+    }
+
+    Ok((withscores, offset, count))
+}
+
+/// Parse optional LIMIT flags (no WITHSCORES) from trailing arguments.
+///
+/// Returns `(offset, count)` where offset/count default to 0/usize::MAX.
+fn parse_limit_only(args: &[Bytes], start_idx: usize) -> Result<(usize, usize), CommandError> {
+    let mut offset: usize = 0;
+    let mut count: usize = usize::MAX;
+
+    let mut i = start_idx;
+    while i < args.len() {
+        let upper = args[i].to_ascii_uppercase();
+        match upper.as_slice() {
+            b"LIMIT" => {
+                if i + 2 >= args.len() {
+                    return Err(CommandError::Generic("ERR syntax error".into()));
+                }
+                let off_str = std::str::from_utf8(&args[i + 1])
+                    .map_err(|_| CommandError::Generic("ERR value is not an integer or out of range".into()))?;
+                let cnt_str = std::str::from_utf8(&args[i + 2])
+                    .map_err(|_| CommandError::Generic("ERR value is not an integer or out of range".into()))?;
+                offset = off_str
+                    .parse::<i64>()
+                    .map_err(|_| CommandError::Generic("ERR value is not an integer or out of range".into()))?
+                    as usize;
+                let raw_count = cnt_str
+                    .parse::<i64>()
+                    .map_err(|_| CommandError::Generic("ERR value is not an integer or out of range".into()))?;
+                count = if raw_count < 0 { usize::MAX } else { raw_count as usize };
+                i += 3;
+            }
+            _ => {
+                return Err(CommandError::Generic("ERR syntax error".into()));
+            }
+        }
+    }
+
+    Ok((offset, count))
+}
+
+/// ZRANGEBYSCORE key min max [WITHSCORES] [LIMIT offset count]
+///
+/// Return members with scores in [min, max] range. min/max use score
+/// bound syntax: `-inf`, `+inf`, `(exclusive`, `inclusive`.
+pub async fn handle_zrangebyscore(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.len() < 3 {
+        return RespValue::err(
+            CommandError::WrongArity {
+                name: "ZRANGEBYSCORE".into(),
+            }
+            .to_string(),
+        );
+    }
+
+    let min = match parse_score_bound(&args[1]) {
+        Ok(v) => v,
+        Err(e) => return RespValue::err(e.to_string()),
+    };
+    let max = match parse_score_bound(&args[2]) {
+        Ok(v) => v,
+        Err(e) => return RespValue::err(e.to_string()),
+    };
+
+    let (withscores, offset, count) = match parse_range_options(args, 3) {
+        Ok(v) => v,
+        Err(e) => return RespValue::err(e.to_string()),
+    };
+
+    match run_transact(&state.db, "ZRANGEBYSCORE", |tr| {
+        let dirs = state.dirs.clone();
+        let key = args[0].clone();
+        let min = min.clone();
+        let max = max.clone();
+        async move {
+            let meta = read_zset_meta_for_read(&tr, &dirs, &key).await?;
+            if meta.is_none() {
+                return Ok(Vec::new());
+            }
+
+            let members = read_zset_members_by_score(&tr, &dirs, &key, false)
+                .await
+                .map_err(helpers::cmd_err)?;
+
+            let filtered: Vec<(f64, Vec<u8>)> = members
+                .into_iter()
+                .filter(|(s, _)| score_in_range(*s, &min, &max))
+                .skip(offset)
+                .take(count)
+                .collect();
+
+            Ok(filtered)
+        }
+    })
+    .await
+    {
+        Ok(pairs) => {
+            let mut result = Vec::new();
+            for (score, member) in pairs {
+                result.push(RespValue::BulkString(Some(Bytes::from(member))));
+                if withscores {
+                    result.push(RespValue::BulkString(Some(Bytes::from(format_score(score)))));
+                }
+            }
+            RespValue::Array(Some(result))
+        }
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ZRANGEBYLEX key min max [LIMIT offset count]
+// ---------------------------------------------------------------------------
+
+/// ZRANGEBYLEX key min max [LIMIT offset count]
+///
+/// Return members in a lexicographic range. All members should have the
+/// same score for meaningful results. min/max use lex bound syntax:
+/// `-`, `+`, `[inclusive`, `(exclusive`.
+pub async fn handle_zrangebylex(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.len() < 3 {
+        return RespValue::err(
+            CommandError::WrongArity {
+                name: "ZRANGEBYLEX".into(),
+            }
+            .to_string(),
+        );
+    }
+
+    let min = match parse_lex_bound(&args[1]) {
+        Ok(v) => v,
+        Err(e) => return RespValue::err(e.to_string()),
+    };
+    let max = match parse_lex_bound(&args[2]) {
+        Ok(v) => v,
+        Err(e) => return RespValue::err(e.to_string()),
+    };
+
+    let (offset, count) = match parse_limit_only(args, 3) {
+        Ok(v) => v,
+        Err(e) => return RespValue::err(e.to_string()),
+    };
+
+    match run_transact(&state.db, "ZRANGEBYLEX", |tr| {
+        let dirs = state.dirs.clone();
+        let key = args[0].clone();
+        let min = min.clone();
+        let max = max.clone();
+        async move {
+            let meta = read_zset_meta_for_read(&tr, &dirs, &key).await?;
+            if meta.is_none() {
+                return Ok(Vec::new());
+            }
+
+            let members = read_zset_members_by_score(&tr, &dirs, &key, false)
+                .await
+                .map_err(helpers::cmd_err)?;
+
+            let filtered: Vec<Vec<u8>> = members
+                .into_iter()
+                .filter(|(_, m)| member_in_lex_range(m.as_slice(), &min, &max))
+                .map(|(_, m)| m)
+                .skip(offset)
+                .take(count)
+                .collect();
+
+            Ok(filtered)
+        }
+    })
+    .await
+    {
+        Ok(members) => {
+            let result: Vec<RespValue> = members
+                .into_iter()
+                .map(|m| RespValue::BulkString(Some(Bytes::from(m))))
+                .collect();
+            RespValue::Array(Some(result))
+        }
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
