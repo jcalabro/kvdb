@@ -230,8 +230,14 @@ pub async fn handle_srem(args: &[Bytes], state: &ConnectionState) -> RespValue {
                 return Err(helpers::cmd_err(CommandError::WrongType));
             }
 
-            let members = &args[1..];
-            let fdb_keys: Vec<Vec<u8>> = members
+            // Deduplicate members within the call — SREM k a a should only
+            // remove "a" once and return 1, not 2. Without deduplication the
+            // parallel existence checks (join_all) would both see the member
+            // as present and over-count removals, corrupting the cardinality.
+            let mut seen = HashSet::new();
+            let unique_members: Vec<&Bytes> = args[1..].iter().filter(|m| seen.insert(m.as_ref().to_vec())).collect();
+
+            let fdb_keys: Vec<Vec<u8>> = unique_members
                 .iter()
                 .map(|member| dirs.set.pack(&(key.as_ref(), member.as_ref())))
                 .collect();
@@ -473,6 +479,11 @@ pub async fn handle_spop(args: &[Bytes], state: &ConnectionState) -> RespValue {
     } else {
         1
     };
+
+    // Short-circuit: SPOP key 0 returns an empty array without touching FDB.
+    if has_count && count == 0 {
+        return RespValue::Array(Some(vec![]));
+    }
 
     match run_transact(&state.db, "SPOP", |tr| {
         let dirs = state.dirs.clone();
@@ -717,6 +728,14 @@ pub async fn handle_smove(args: &[Bytes], state: &ConnectionState) -> RespValue 
 
             if exists_in_source.is_none() {
                 return Ok(0i64); // member not in source
+            }
+
+            // Fast path: source == destination. The member already exists
+            // in the "destination" (same set), so this is a no-op that
+            // returns 1. Without this check, the clear-then-read-your-writes
+            // sequence would corrupt the cardinality.
+            if source == destination {
+                return Ok(1i64);
             }
 
             // --- Destination key ---
@@ -1136,6 +1155,11 @@ pub async fn handle_sintercard(args: &[Bytes], state: &ConnectionState) -> RespV
                     Some(m) => {
                         if m.key_type != KeyType::Set {
                             return Err(helpers::cmd_err(CommandError::WrongType));
+                        }
+                        // Short-circuit on empty set (avoids reading all members
+                        // from FDB when meta already tells us the set is empty).
+                        if m.cardinality == 0 {
+                            return Ok(0i64);
                         }
                         let members = read_set_members(&tr, &dirs, set_key).await.map_err(helpers::cmd_err)?;
                         if members.is_empty() {

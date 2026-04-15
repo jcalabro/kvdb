@@ -1055,3 +1055,377 @@ async fn scard_nonexistent_key() {
         .unwrap();
     assert_eq!(card, 0);
 }
+
+// ---------------------------------------------------------------------------
+// SREM with duplicate members in a single call
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn srem_duplicate_members_in_single_call() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("SADD")
+        .arg("myset")
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // SREM with "a" repeated: should only remove "a" once and return 1.
+    let removed: i64 = redis::cmd("SREM")
+        .arg("myset")
+        .arg("a")
+        .arg("a")
+        .arg("a")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(removed, 1);
+
+    // Cardinality should be 2, not 0 (which would happen without dedup).
+    let card: i64 = redis::cmd("SCARD").arg("myset").query_async(&mut con).await.unwrap();
+    assert_eq!(card, 2);
+
+    // Verify the right members remain.
+    let members: Vec<String> = redis::cmd("SMEMBERS").arg("myset").query_async(&mut con).await.unwrap();
+    let member_set: HashSet<String> = members.into_iter().collect();
+    assert_eq!(member_set, HashSet::from(["b".to_string(), "c".to_string()]));
+}
+
+// ---------------------------------------------------------------------------
+// SMOVE source == destination
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn smove_same_source_and_destination() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("SADD")
+        .arg("myset")
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // SMOVE to the same key should return 1 (member exists) but not change cardinality.
+    let moved: i64 = redis::cmd("SMOVE")
+        .arg("myset")
+        .arg("myset")
+        .arg("a")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(moved, 1);
+
+    // Cardinality should still be 3.
+    let card: i64 = redis::cmd("SCARD").arg("myset").query_async(&mut con).await.unwrap();
+    assert_eq!(card, 3);
+
+    // "a" should still be a member.
+    let is_member: i64 = redis::cmd("SISMEMBER")
+        .arg("myset")
+        .arg("a")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(is_member, 1);
+}
+
+#[tokio::test]
+async fn smove_same_key_nonexistent_member() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("SADD")
+        .arg("myset")
+        .arg("a")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // Member "z" doesn't exist — should return 0.
+    let moved: i64 = redis::cmd("SMOVE")
+        .arg("myset")
+        .arg("myset")
+        .arg("z")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(moved, 0);
+
+    let card: i64 = redis::cmd("SCARD").arg("myset").query_async(&mut con).await.unwrap();
+    assert_eq!(card, 1);
+}
+
+// ---------------------------------------------------------------------------
+// SPOP / SRANDMEMBER count=0
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn spop_count_zero() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("SADD")
+        .arg("myset")
+        .arg("a")
+        .arg("b")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let popped: Vec<String> = redis::cmd("SPOP")
+        .arg("myset")
+        .arg(0)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert!(popped.is_empty());
+
+    // Set should be unchanged.
+    let card: i64 = redis::cmd("SCARD").arg("myset").query_async(&mut con).await.unwrap();
+    assert_eq!(card, 2);
+}
+
+#[tokio::test]
+async fn srandmember_count_zero() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("SADD")
+        .arg("myset")
+        .arg("a")
+        .arg("b")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let members: Vec<String> = redis::cmd("SRANDMEMBER")
+        .arg("myset")
+        .arg(0)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert!(members.is_empty());
+
+    // Set should be unchanged.
+    let card: i64 = redis::cmd("SCARD").arg("myset").query_async(&mut con).await.unwrap();
+    assert_eq!(card, 2);
+}
+
+// ---------------------------------------------------------------------------
+// Multi-set operations with 3+ sets
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sinter_three_sets() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("SADD")
+        .arg("s1")
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let _: i64 = redis::cmd("SADD")
+        .arg("s2")
+        .arg("b")
+        .arg("c")
+        .arg("d")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let _: i64 = redis::cmd("SADD")
+        .arg("s3")
+        .arg("c")
+        .arg("d")
+        .arg("e")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // Intersection of all three: only "c".
+    let inter: Vec<String> = redis::cmd("SINTER")
+        .arg("s1")
+        .arg("s2")
+        .arg("s3")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(inter, vec!["c".to_string()]);
+}
+
+#[tokio::test]
+async fn sunion_three_sets() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("SADD")
+        .arg("s1")
+        .arg("a")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let _: i64 = redis::cmd("SADD")
+        .arg("s2")
+        .arg("b")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let _: i64 = redis::cmd("SADD")
+        .arg("s3")
+        .arg("c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let union: Vec<String> = redis::cmd("SUNION")
+        .arg("s1")
+        .arg("s2")
+        .arg("s3")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let union_set: HashSet<String> = union.into_iter().collect();
+    assert_eq!(
+        union_set,
+        HashSet::from(["a".to_string(), "b".to_string(), "c".to_string()])
+    );
+}
+
+#[tokio::test]
+async fn sdiff_three_sets() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("SADD")
+        .arg("s1")
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .arg("d")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let _: i64 = redis::cmd("SADD")
+        .arg("s2")
+        .arg("b")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let _: i64 = redis::cmd("SADD")
+        .arg("s3")
+        .arg("c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // s1 - s2 - s3 = {a, d}
+    let diff: Vec<String> = redis::cmd("SDIFF")
+        .arg("s1")
+        .arg("s2")
+        .arg("s3")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let diff_set: HashSet<String> = diff.into_iter().collect();
+    assert_eq!(diff_set, HashSet::from(["a".to_string(), "d".to_string()]));
+}
+
+// ---------------------------------------------------------------------------
+// Store operations where destination is one of the source keys
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sinterstore_dest_is_source() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("SADD")
+        .arg("s1")
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let _: i64 = redis::cmd("SADD")
+        .arg("s2")
+        .arg("b")
+        .arg("c")
+        .arg("d")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // Store intersection into s1 (overwriting it).
+    let count: i64 = redis::cmd("SINTERSTORE")
+        .arg("s1")
+        .arg("s1")
+        .arg("s2")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+
+    let members: Vec<String> = redis::cmd("SMEMBERS").arg("s1").query_async(&mut con).await.unwrap();
+    let member_set: HashSet<String> = members.into_iter().collect();
+    assert_eq!(member_set, HashSet::from(["b".to_string(), "c".to_string()]));
+}
+
+#[tokio::test]
+async fn sdiffstore_empty_result_deletes_dest() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // Pre-populate destination.
+    let _: i64 = redis::cmd("SADD")
+        .arg("dest")
+        .arg("x")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let _: i64 = redis::cmd("SADD")
+        .arg("s1")
+        .arg("a")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let _: i64 = redis::cmd("SADD")
+        .arg("s2")
+        .arg("a")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // s1 - s2 = {} — destination should be deleted.
+    let count: i64 = redis::cmd("SDIFFSTORE")
+        .arg("dest")
+        .arg("s1")
+        .arg("s2")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+
+    let exists: i64 = redis::cmd("EXISTS").arg("dest").query_async(&mut con).await.unwrap();
+    assert_eq!(exists, 0);
+}

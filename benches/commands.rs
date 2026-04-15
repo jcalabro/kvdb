@@ -523,6 +523,123 @@ fn bench_hash_commands(c: &mut Criterion) {
     group.finish();
 }
 
+// ---------------------------------------------------------------------------
+// Full-stack set command benchmarks
+// ---------------------------------------------------------------------------
+
+fn bench_set_commands(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+
+    let (addr, _shutdown_tx, _handle) = rt.block_on(start_bench_server());
+
+    let client = redis::Client::open(format!("redis://{addr}")).unwrap();
+    let mut con = rt.block_on(async { client.get_multiplexed_async_connection().await.unwrap() });
+
+    let mut group = c.benchmark_group("set");
+
+    // 1. SADD single member to a fresh set.
+    group.bench_function("sadd_1member", |b| {
+        let mut i = 0u64;
+        b.iter(|| {
+            let key = format!("bench_sadd_{i}");
+            i += 1;
+            rt.block_on(async {
+                let _: i64 = redis::cmd("SADD")
+                    .arg(&key)
+                    .arg("member")
+                    .query_async(&mut con)
+                    .await
+                    .unwrap();
+            });
+        });
+    });
+
+    // 2. SADD 10 members at once.
+    group.bench_function("sadd_10members", |b| {
+        let mut i = 0u64;
+        b.iter(|| {
+            let key = format!("bench_sadd10_{i}");
+            i += 1;
+            let mut cmd = redis::cmd("SADD");
+            cmd.arg(&key);
+            for j in 0..10u64 {
+                cmd.arg(format!("m{j}"));
+            }
+            rt.block_on(async {
+                let _: i64 = cmd.query_async(&mut con).await.unwrap();
+            });
+        });
+    });
+
+    // 3. SISMEMBER on an existing set.
+    rt.block_on(async {
+        let mut cmd = redis::cmd("SADD");
+        cmd.arg("bench_sismember_target");
+        for j in 0..100u64 {
+            cmd.arg(format!("m{j}"));
+        }
+        let _: i64 = cmd.query_async(&mut con).await.unwrap();
+    });
+
+    group.bench_function("sismember", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                let _: i64 = redis::cmd("SISMEMBER")
+                    .arg("bench_sismember_target")
+                    .arg("m50")
+                    .query_async(&mut con)
+                    .await
+                    .unwrap();
+            });
+        });
+    });
+
+    // 4. SMEMBERS on a 100-member set.
+    group.bench_function("smembers_100", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                let _: Vec<String> = redis::cmd("SMEMBERS")
+                    .arg("bench_sismember_target")
+                    .query_async(&mut con)
+                    .await
+                    .unwrap();
+            });
+        });
+    });
+
+    // 5. SINTER of two 50-member sets with ~25 overlap.
+    rt.block_on(async {
+        let mut cmd_a = redis::cmd("SADD");
+        cmd_a.arg("bench_sinter_a");
+        for j in 0..50u64 {
+            cmd_a.arg(format!("m{j}"));
+        }
+        let _: i64 = cmd_a.query_async(&mut con).await.unwrap();
+
+        let mut cmd_b = redis::cmd("SADD");
+        cmd_b.arg("bench_sinter_b");
+        for j in 25..75u64 {
+            cmd_b.arg(format!("m{j}"));
+        }
+        let _: i64 = cmd_b.query_async(&mut con).await.unwrap();
+    });
+
+    group.bench_function("sinter_50x50", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                let _: Vec<String> = redis::cmd("SINTER")
+                    .arg("bench_sinter_a")
+                    .arg("bench_sinter_b")
+                    .query_async(&mut con)
+                    .await
+                    .unwrap();
+            });
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     // Fast feedback: 500ms warmup + 1.5s measurement × 30 samples.
@@ -549,5 +666,6 @@ criterion_group! {
         bench_meta_serialize,
         bench_string_commands,
         bench_hash_commands,
+        bench_set_commands,
 }
 criterion_main!(benches);
