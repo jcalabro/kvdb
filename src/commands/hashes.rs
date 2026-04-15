@@ -9,6 +9,7 @@
 
 use bytes::Bytes;
 use foundationdb::RangeOption;
+use futures::future::join_all;
 
 use crate::error::CommandError;
 use crate::protocol::types::RespValue;
@@ -16,14 +17,17 @@ use crate::server::connection::ConnectionState;
 use crate::storage::meta::{KeyType, ObjectMeta};
 use crate::storage::{helpers, run_transact};
 
+use super::util::{format_redis_float, parse_i64_arg};
+
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
 
 /// Read all (field, value) pairs for a hash key via FDB range read.
 ///
-/// Returns an empty vec if the hash has no fields (caller should check
-/// for key existence before calling if the distinction matters).
+/// Paginates through the full range so hashes with more fields than a
+/// single FDB response batch are read completely. Returns an empty vec
+/// if the hash has no fields.
 async fn read_hash_fields(
     tr: &foundationdb::Transaction,
     dirs: &crate::storage::directories::Directories,
@@ -31,44 +35,29 @@ async fn read_hash_fields(
 ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
     let sub = dirs.hash.subspace(&(key,));
     let (begin, end) = sub.range();
-    let range_opt = RangeOption::from((begin.as_slice(), end.as_slice()));
-    let kvs = tr
-        .get_range(&range_opt, 10_000, false)
-        .await
-        .map_err(|e| CommandError::Generic(e.to_string()))?;
-    let mut pairs = Vec::with_capacity(kvs.len());
-    for kv in kvs.iter() {
-        let (_, field): (Vec<u8>, Vec<u8>) = dirs
-            .hash
-            .unpack(kv.key())
-            .map_err(|e| CommandError::Generic(format!("hash key unpack: {e:?}")))?;
-        pairs.push((field, kv.value().to_vec()));
-    }
-    Ok(pairs)
-}
+    let mut maybe_range: Option<RangeOption<'_>> = Some(RangeOption::from((begin.as_slice(), end.as_slice())));
+    let mut pairs = Vec::new();
+    let mut iteration = 1;
 
-/// Parse a byte argument as i64 (same pattern as strings.rs).
-fn parse_i64_arg(arg: &Bytes) -> Result<i64, RespValue> {
-    let s = std::str::from_utf8(arg).map_err(|_| RespValue::err("ERR value is not an integer or out of range"))?;
-    s.parse::<i64>()
-        .map_err(|_| RespValue::err("ERR value is not an integer or out of range"))
-}
+    while let Some(range_opt) = maybe_range.take() {
+        let kvs = tr
+            .get_range(&range_opt, iteration, false)
+            .await
+            .map_err(|e| CommandError::Generic(e.to_string()))?;
 
-/// Format a float following Redis INCRBYFLOAT rules:
-/// - If the result is an exact integer that fits in i64, format without decimal point.
-/// - Otherwise, use minimal precision via ryu and strip trailing zeros.
-fn format_redis_float(val: f64) -> String {
-    if val.fract() == 0.0 && val.is_finite() && val >= i64::MIN as f64 && val <= i64::MAX as f64 {
-        format!("{}", val as i64)
-    } else {
-        let mut s = ryu::Buffer::new().format(val).to_string();
-        if s.contains('.') {
-            let trimmed = s.trim_end_matches('0');
-            let trimmed = trimmed.trim_end_matches('.');
-            s.truncate(trimmed.len());
+        for kv in kvs.iter() {
+            let (_, field): (Vec<u8>, Vec<u8>) = dirs
+                .hash
+                .unpack(kv.key())
+                .map_err(|e| CommandError::Generic(format!("hash key unpack: {e:?}")))?;
+            pairs.push((field, kv.value().to_vec()));
         }
-        s
+
+        maybe_range = range_opt.next_range(&kvs);
+        iteration += 1;
     }
+
+    Ok(pairs)
 }
 
 // ---------------------------------------------------------------------------
@@ -119,25 +108,23 @@ pub async fn handle_hset(args: &[Bytes], state: &ConnectionState) -> RespValue {
             let old_expires_at_ms = live_meta.map_or(0, |m| m.expires_at_ms);
             let mut added: i64 = 0;
 
-            // Process field-value pairs.
+            // Process field-value pairs. Pre-pack FDB keys so we can fire
+            // all existence checks in parallel (same pattern as MGET).
             let pairs = &args[1..];
-            for chunk in pairs.chunks(2) {
-                let field = &chunk[0];
-                let value = &chunk[1];
+            let fdb_keys: Vec<Vec<u8>> = pairs
+                .chunks(2)
+                .map(|chunk| dirs.hash.pack(&(key.as_ref(), chunk[0].as_ref())))
+                .collect();
 
-                let fdb_key = dirs.hash.pack(&(key.as_ref(), field.as_ref()));
+            let get_futures: Vec<_> = fdb_keys.iter().map(|fk| tr.get(fk, false)).collect();
+            let results = join_all(get_futures).await;
 
-                // Check if the field already exists to distinguish add vs update.
-                let existing = tr
-                    .get(&fdb_key, false)
-                    .await
-                    .map_err(|e| helpers::cmd_err(CommandError::Generic(e.to_string())))?;
-
+            for (i, result) in results.into_iter().enumerate() {
+                let existing = result.map_err(|e| helpers::cmd_err(CommandError::Generic(e.to_string())))?;
                 if existing.is_none() {
                     added += 1;
                 }
-
-                tr.set(&fdb_key, value);
+                tr.set(&fdb_keys[i], &pairs[i * 2 + 1]);
             }
 
             // Write updated ObjectMeta.
@@ -546,13 +533,17 @@ pub async fn handle_hmget(args: &[Bytes], state: &ConnectionState) -> RespValue 
                         return Err(helpers::cmd_err(CommandError::WrongType));
                     }
 
+                    // Fire all field lookups in parallel.
+                    let fdb_keys: Vec<Vec<u8>> = args[1..]
+                        .iter()
+                        .map(|field| dirs.hash.pack(&(key.as_ref(), field.as_ref())))
+                        .collect();
+                    let get_futures: Vec<_> = fdb_keys.iter().map(|fk| tr.get(fk, false)).collect();
+                    let raw_results = join_all(get_futures).await;
+
                     let mut results = Vec::with_capacity(field_count);
-                    for field in &args[1..] {
-                        let fdb_key = dirs.hash.pack(&(key.as_ref(), field.as_ref()));
-                        let val = tr
-                            .get(&fdb_key, false)
-                            .await
-                            .map_err(|e| helpers::cmd_err(CommandError::Generic(e.to_string())))?;
+                    for result in raw_results {
+                        let val = result.map_err(|e| helpers::cmd_err(CommandError::Generic(e.to_string())))?;
                         results.push(val.map(|v| v.to_vec()));
                     }
                     Ok(results)
@@ -653,11 +644,16 @@ pub async fn handle_hincrby(args: &[Bytes], state: &ConnectionState) -> RespValu
 
             let (current_val, is_new_field) = match &existing {
                 Some(data) => {
-                    let s = std::str::from_utf8(data)
-                        .map_err(|_| helpers::cmd_err(CommandError::Generic("hash value is not an integer".into())))?;
-                    let v: i64 = s
-                        .parse()
-                        .map_err(|_| helpers::cmd_err(CommandError::Generic("hash value is not an integer".into())))?;
+                    let s = std::str::from_utf8(data).map_err(|_| {
+                        helpers::cmd_err(CommandError::Generic(
+                            "hash value is not an integer or out of range".into(),
+                        ))
+                    })?;
+                    let v: i64 = s.parse().map_err(|_| {
+                        helpers::cmd_err(CommandError::Generic(
+                            "hash value is not an integer or out of range".into(),
+                        ))
+                    })?;
                     (v, false)
                 }
                 None => (0i64, true),
@@ -763,11 +759,12 @@ pub async fn handle_hincrbyfloat(args: &[Bytes], state: &ConnectionState) -> Res
 
             let (current_val, is_new_field) = match &existing {
                 Some(data) => {
-                    let s = std::str::from_utf8(data)
-                        .map_err(|_| helpers::cmd_err(CommandError::Generic("value is not a valid float".into())))?;
-                    let v: f64 = s
-                        .parse()
-                        .map_err(|_| helpers::cmd_err(CommandError::Generic("value is not a valid float".into())))?;
+                    let s = std::str::from_utf8(data).map_err(|_| {
+                        helpers::cmd_err(CommandError::Generic("hash value is not a valid float".into()))
+                    })?;
+                    let v: f64 = s.parse().map_err(|_| {
+                        helpers::cmd_err(CommandError::Generic("hash value is not a valid float".into()))
+                    })?;
                     (v, false)
                 }
                 None => (0.0f64, true),

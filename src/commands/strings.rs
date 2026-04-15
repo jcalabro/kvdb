@@ -14,6 +14,8 @@ use crate::server::connection::ConnectionState;
 use crate::storage::meta::{KeyType, ObjectMeta};
 use crate::storage::{helpers, run_transact};
 
+use super::util::{format_redis_float, parse_i64_arg};
+
 // ---------------------------------------------------------------------------
 // GET key
 // ---------------------------------------------------------------------------
@@ -650,13 +652,6 @@ pub async fn handle_mset(args: &[Bytes], state: &ConnectionState) -> RespValue {
 // INCR / DECR / INCRBY / DECRBY — shared helper
 // ---------------------------------------------------------------------------
 
-/// Parse a byte slice as an i64.
-fn parse_i64_arg(arg: &Bytes) -> Result<i64, RespValue> {
-    let s = std::str::from_utf8(arg).map_err(|_| RespValue::err("ERR value is not an integer or out of range"))?;
-    s.parse::<i64>()
-        .map_err(|_| RespValue::err("ERR value is not an integer or out of range"))
-}
-
 /// Shared implementation for INCR, DECR, INCRBY, DECRBY.
 ///
 /// Reads the current value (defaulting to "0" if the key does not exist),
@@ -788,25 +783,6 @@ pub async fn handle_decrby(args: &[Bytes], state: &ConnectionState) -> RespValue
 // ---------------------------------------------------------------------------
 // INCRBYFLOAT key increment
 // ---------------------------------------------------------------------------
-
-/// Format a float following Redis INCRBYFLOAT rules:
-/// - If the result is an exact integer that fits in i64, format without decimal point.
-/// - Otherwise, use minimal precision and strip trailing zeros.
-fn format_redis_float(val: f64) -> String {
-    if val.fract() == 0.0 && val.is_finite() && val >= i64::MIN as f64 && val <= i64::MAX as f64 {
-        // Integer result that fits in i64 — format without decimal.
-        format!("{}", val as i64)
-    } else {
-        // Use ryu for fast float-to-string, then strip trailing zeros.
-        let mut s = ryu::Buffer::new().format(val).to_string();
-        if s.contains('.') {
-            let trimmed = s.trim_end_matches('0');
-            let trimmed = trimmed.trim_end_matches('.');
-            s.truncate(trimmed.len());
-        }
-        s
-    }
-}
 
 /// INCRBYFLOAT key increment -- Increments the float value of `key` by `increment`.
 pub async fn handle_incrbyfloat(args: &[Bytes], state: &ConnectionState) -> RespValue {

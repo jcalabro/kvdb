@@ -8,6 +8,7 @@
 pub mod hashes;
 pub mod keys;
 pub mod strings;
+pub(crate) mod util;
 
 use bytes::Bytes;
 

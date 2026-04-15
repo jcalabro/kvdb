@@ -848,6 +848,194 @@ async fn hset_wrongtype_on_string() {
 }
 
 // ---------------------------------------------------------------------------
+// HRANDFIELD extended tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn hrandfield_nonexistent_key_no_count() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // No-count mode on nonexistent key: returns nil.
+    let val: Option<String> = redis::cmd("HRANDFIELD")
+        .arg("nokey")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(val, None);
+}
+
+#[tokio::test]
+async fn hrandfield_nonexistent_key_with_count() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // Count mode on nonexistent key: returns empty array.
+    let fields: Vec<String> = redis::cmd("HRANDFIELD")
+        .arg("nokey")
+        .arg(5)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert!(fields.is_empty());
+}
+
+#[tokio::test]
+async fn hrandfield_count_zero_returns_empty() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("HSET")
+        .arg("myhash")
+        .arg("f1")
+        .arg("v1")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // count=0 returns empty array, even when the hash has fields.
+    let fields: Vec<String> = redis::cmd("HRANDFIELD")
+        .arg("myhash")
+        .arg(0)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert!(fields.is_empty());
+}
+
+#[tokio::test]
+async fn hrandfield_withvalues() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("HSET")
+        .arg("myhash")
+        .arg("a")
+        .arg("1")
+        .arg("b")
+        .arg("2")
+        .arg("c")
+        .arg("3")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // count=2 WITHVALUES: returns 4 elements (2 field-value pairs).
+    let result: Vec<String> = redis::cmd("HRANDFIELD")
+        .arg("myhash")
+        .arg(2)
+        .arg("WITHVALUES")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(result.len(), 4, "expected 2 field-value pairs (4 elements)");
+
+    // Each even-indexed element should be a valid field, and the odd-indexed
+    // element after it should be the correct value.
+    let expected: std::collections::HashMap<&str, &str> = [("a", "1"), ("b", "2"), ("c", "3")].into_iter().collect();
+    for pair in result.chunks(2) {
+        let field = &pair[0];
+        let value = &pair[1];
+        assert!(expected.contains_key(field.as_str()), "unexpected field: {field}");
+        assert_eq!(
+            expected[field.as_str()],
+            value.as_str(),
+            "wrong value for field {field}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn hrandfield_negative_withvalues() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let _: i64 = redis::cmd("HSET")
+        .arg("myhash")
+        .arg("only")
+        .arg("val")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // count=-3 WITHVALUES from 1-field hash: 3 pairs = 6 elements.
+    let result: Vec<String> = redis::cmd("HRANDFIELD")
+        .arg("myhash")
+        .arg(-3)
+        .arg("WITHVALUES")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(result.len(), 6, "expected 3 field-value pairs (6 elements)");
+
+    // All fields should be "only" and all values should be "val".
+    for pair in result.chunks(2) {
+        assert_eq!(pair[0], "only");
+        assert_eq!(pair[1], "val");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HINCRBYFLOAT edge case tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn hincrbyfloat_nan_rejected() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let result: redis::RedisResult<String> = redis::cmd("HINCRBYFLOAT")
+        .arg("myhash")
+        .arg("field")
+        .arg("NaN")
+        .query_async(&mut con)
+        .await;
+    assert!(result.is_err(), "HINCRBYFLOAT with NaN should error");
+}
+
+#[tokio::test]
+async fn hincrbyfloat_inf_rejected() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    let result: redis::RedisResult<String> = redis::cmd("HINCRBYFLOAT")
+        .arg("myhash")
+        .arg("field")
+        .arg("inf")
+        .query_async(&mut con)
+        .await;
+    assert!(result.is_err(), "HINCRBYFLOAT with inf should error");
+}
+
+#[tokio::test]
+async fn hincrbyfloat_not_a_float_error() {
+    let ctx = TestContext::new().await;
+    let mut con = ctx.connection().await;
+
+    // Set a non-numeric field value.
+    let _: i64 = redis::cmd("HSET")
+        .arg("myhash")
+        .arg("name")
+        .arg("alice")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let result: redis::RedisResult<String> = redis::cmd("HINCRBYFLOAT")
+        .arg("myhash")
+        .arg("name")
+        .arg("1.0")
+        .query_async(&mut con)
+        .await;
+    assert!(result.is_err(), "HINCRBYFLOAT on non-float value should error");
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.to_lowercase().contains("not a valid float"),
+        "expected 'not a valid float' error, got: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Arity error tests
 // ---------------------------------------------------------------------------
 
@@ -859,6 +1047,14 @@ async fn hash_arity_errors() {
     // HSET with too few args (needs key + at least one field-value pair).
     let result: redis::RedisResult<i64> = redis::cmd("HSET").arg("myhash").query_async(&mut con).await;
     assert!(result.is_err(), "HSET with 1 arg should error");
+
+    // HSET with incomplete pair (key + field, no value).
+    let result: redis::RedisResult<i64> = redis::cmd("HSET")
+        .arg("myhash")
+        .arg("field")
+        .query_async(&mut con)
+        .await;
+    assert!(result.is_err(), "HSET with key + field only should error");
 
     // HGET with wrong arg count (needs exactly key + field).
     let result: redis::RedisResult<String> = redis::cmd("HGET").arg("myhash").query_async(&mut con).await;

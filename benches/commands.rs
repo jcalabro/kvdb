@@ -398,6 +398,131 @@ fn bench_string_commands(c: &mut Criterion) {
     group.finish();
 }
 
+// ---------------------------------------------------------------------------
+// Full-stack hash command benchmarks
+// ---------------------------------------------------------------------------
+
+fn bench_hash_commands(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+
+    let (addr, _shutdown_tx, _handle) = rt.block_on(start_bench_server());
+
+    let client = redis::Client::open(format!("redis://{addr}")).unwrap();
+    let mut con = rt.block_on(async { client.get_multiplexed_async_connection().await.unwrap() });
+
+    let mut group = c.benchmark_group("hash");
+
+    // 1. HSET single field.
+    group.bench_function("hset_1field", |b| {
+        let mut i = 0u64;
+        b.iter(|| {
+            let key = format!("bench_hset_{i}");
+            i += 1;
+            rt.block_on(async {
+                let _: i64 = redis::cmd("HSET")
+                    .arg(&key)
+                    .arg("field")
+                    .arg(&[0u8; 64][..])
+                    .query_async(&mut con)
+                    .await
+                    .unwrap();
+            });
+        });
+    });
+
+    // 2. HGET single field (pre-populated).
+    rt.block_on(async {
+        let _: i64 = redis::cmd("HSET")
+            .arg("bench_hget_target")
+            .arg("field")
+            .arg(&[0u8; 64][..])
+            .query_async(&mut con)
+            .await
+            .unwrap();
+    });
+
+    group.bench_function("hget_1field", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                let _: Vec<u8> = redis::cmd("HGET")
+                    .arg("bench_hget_target")
+                    .arg("field")
+                    .query_async(&mut con)
+                    .await
+                    .unwrap();
+            });
+        });
+    });
+
+    // 3. HSET 10 fields at once.
+    group.bench_function("hset_10fields", |b| {
+        let mut i = 0u64;
+        b.iter(|| {
+            let key = format!("bench_hset10_{i}");
+            i += 1;
+            let mut cmd = redis::cmd("HSET");
+            cmd.arg(&key);
+            for j in 0..10u64 {
+                cmd.arg(format!("f{j}"));
+                cmd.arg(&[b'v'; 64][..]);
+            }
+            rt.block_on(async {
+                let _: i64 = cmd.query_async(&mut con).await.unwrap();
+            });
+        });
+    });
+
+    // 4. HGETALL on a 10-field hash (pre-populated).
+    rt.block_on(async {
+        let mut cmd = redis::cmd("HSET");
+        cmd.arg("bench_hgetall_target");
+        for j in 0..10u64 {
+            cmd.arg(format!("f{j}"));
+            cmd.arg(&[b'v'; 64][..]);
+        }
+        let _: i64 = cmd.query_async(&mut con).await.unwrap();
+    });
+
+    group.bench_function("hgetall_10fields", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                let _: std::collections::HashMap<String, Vec<u8>> = redis::cmd("HGETALL")
+                    .arg("bench_hgetall_target")
+                    .query_async(&mut con)
+                    .await
+                    .unwrap();
+            });
+        });
+    });
+
+    // 5. HINCRBY on an existing counter.
+    rt.block_on(async {
+        let _: i64 = redis::cmd("HSET")
+            .arg("bench_hincr")
+            .arg("counter")
+            .arg("0")
+            .query_async(&mut con)
+            .await
+            .unwrap();
+    });
+
+    group.bench_function("hincrby", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                let _: i64 = redis::cmd("HINCRBY")
+                    .arg("bench_hincr")
+                    .arg("counter")
+                    .arg(1)
+                    .query_async(&mut con)
+                    .await
+                    .unwrap();
+            });
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     // Fast feedback: 500ms warmup + 1.5s measurement × 30 samples.
@@ -423,5 +548,6 @@ criterion_group! {
         bench_roundtrip,
         bench_meta_serialize,
         bench_string_commands,
+        bench_hash_commands,
 }
 criterion_main!(benches);
