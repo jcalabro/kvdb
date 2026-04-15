@@ -15,7 +15,7 @@
 | M8: List Commands | **Complete** | 14 commands (LPUSH, RPUSH, LPOP, RPOP, LLEN, LINDEX, LRANGE, LSET, LTRIM, LREM, LPUSHX, RPUSHX, LINSERT, LPOS). Index-based storage (O(1) push/pop/LINDEX, O(k) LRANGE). Compact-rewrite for LREM/LINSERT. Element size validation (100KB FDB limit). 37 integration tests, 10 acceptance tests (property-based VecDeque model + TTL + WRONGTYPE). |
 | M9: Sorted Set Commands | **Complete** | 20 commands, dual-index FDB layout, 60 integration tests, 8 acceptance tests. |
 | M9.5: Cross-Key List Commands | **Complete** | 2 commands (LMOVE, LMPOP). Cross-key atomicity via single FDB transaction. 25 integration tests, 4 acceptance tests (property-based + model). |
-| M10: Transactions | Not started | |
+| M10: Transactions | **Complete** | 5 commands, two-phase WATCH conflict detection, shared-transaction MULTI/EXEC, no-rollback semantics. 24 integration tests. |
 | M11: Pub/Sub | Not started | |
 | M12: Server Commands & Observability | Not started | |
 | M13: Compatibility Testing | Not started | |
@@ -240,6 +240,47 @@ Shared helper: `parse_direction()` for LEFT|RIGHT argument parsing (used by both
 **Smoke tests** (`examples/smoke.rs`) — 9 checks: LMOVE cross-key move, same-key rotation, nonexistent source nil. LMPOP first-nonempty, COUNT, all-empty nil.
 
 **`just test`**: 520 tests in ~1.9s. **`just accept`**: 76 acceptance tests in ~18s.
+
+### What's been built (M10)
+
+**Transaction commands** (`src/commands/transaction.rs`, ~480 lines) — 5 handlers:
+- **MULTI**: Enter queuing mode. Moves pre-existing WATCHed keys (with their meta snapshots) into transaction state. Rejects nesting.
+- **EXEC**: Execute all queued commands in a single FDB transaction. Two-phase WATCH conflict detection (byte comparison + FDB conflict set). No-rollback on per-command errors. Returns array of results, or nil on WATCH conflict. Pin<Box<dyn Future>> to break async recursion cycle.
+- **DISCARD**: Abort transaction, clear queue and watched keys.
+- **WATCH**: Optimistic locking — snapshot each key's raw ObjectMeta bytes at WATCH time using a separate snapshot read. Rejects calls inside MULTI. Accumulates across multiple WATCH calls. Deduplicates keys.
+- **UNWATCH**: Clear all watched keys (works inside and outside MULTI).
+
+**Shared-transaction architecture** (`src/storage/transaction.rs`) — `run_transact` accepts an optional `shared_tr: Option<&Arc<Transaction>>` parameter. During MULTI/EXEC, all queued command handlers share a single FDB transaction via this parameter, enabling read-your-writes within the block. In standalone mode (normal commands), behavior is unchanged. `RetryableTransaction` is constructed from the shared `Arc<Transaction>` via transmute (with compile-time size assertion) since its constructor is `pub(crate)`.
+
+**Connection state** (`src/server/connection.rs`) — `ConnectionState` extended with:
+- `transaction: Option<TransactionState>` — tracks queued commands, watched keys, error flag
+- `watched_keys: Vec<WatchedKey>` — pre-MULTI watches with meta snapshots
+- `active_transaction: Option<Arc<Transaction>>` — injected during EXEC for shared-transaction mode
+
+**Dispatch interception** (`src/commands/mod.rs`) — When inside a MULTI block, dispatch intercepts commands before normal routing. Transaction-control commands (MULTI, EXEC, DISCARD, WATCH, UNWATCH, QUIT) execute immediately; all others are queued with `+QUEUED` response. Unknown commands set the error flag (EXECABORT on EXEC).
+
+**Two-phase WATCH conflict detection**:
+1. **Byte comparison** — At WATCH time, each key's raw ObjectMeta bytes are snapshot-read and stored. At EXEC time, a non-snapshot re-read compares current bytes against the snapshot. This catches modifications that happened before the EXEC transaction's read version (which FDB's conflict ranges alone cannot detect, since the EXEC transaction is created after potentially conflicting writes).
+2. **FDB conflict detection** — The non-snapshot re-read adds WATCHed keys to the transaction's read conflict set, so FDB aborts the commit if another transaction modifies a WATCHed key between the EXEC transaction's read version and commit time.
+
+**Per-command metrics in shared-transaction path** — `run_in_shared` records `FDB_TRANSACTION_DURATION_SECONDS` with `"shared"` / `"shared_error"` status labels, so per-command latency is visible during MULTI/EXEC workloads.
+
+**Known limitation**: Commands inside EXEC use non-snapshot reads, so concurrent modifications to ANY read key (not just WATCHed keys) can cause the FDB commit to fail. When this happens, EXEC returns nil (same as a WATCH conflict). Under low contention this is rare; under high contention, clients should retry. This is a documented deviation from Redis, where MULTI/EXEC without WATCH always succeeds.
+
+**Integration tests** (`tests/transactions.rs`) — 24 tests covering:
+- MULTI/EXEC basics: basic SET+GET, empty queue, multiple command types
+- Read-your-writes: SET then GET within same MULTI sees the write
+- DISCARD: clears queue (changes don't persist), error without MULTI
+- Error handling: nested MULTI, EXEC without MULTI, EXECABORT on unknown command
+- No-rollback: WRONGTYPE error in queue doesn't abort other commands
+- WATCH: no-conflict success, conflict aborts (two-client test), non-existent key creation detected, existing key deletion detected
+- UNWATCH: clears watches, WATCH inside MULTI rejected
+- WATCH lifecycle: cleared after EXEC, cleared after DISCARD
+- Multiple WATCH calls accumulate (second watched key conflict detected)
+- Recovery: new MULTI/EXEC succeeds immediately after failed EXEC
+- Data structure coverage: hashes, lists, sets, sorted sets inside MULTI/EXEC
+
+**`just test`**: 544 tests in ~2.0s. **`just accept`**: 76 acceptance tests in ~18s.
 
 ---
 
