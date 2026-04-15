@@ -317,7 +317,7 @@ async fn handle_push(
     left: bool,
     only_if_exists: bool,
 ) -> RespValue {
-    match run_transact(&state.db, op, |tr| {
+    match run_transact(&state.db, state.shared_txn(), op, |tr| {
         let dirs = state.dirs.clone();
         let args = args.to_vec();
         async move {
@@ -424,7 +424,7 @@ async fn handle_pop(args: &[Bytes], state: &ConnectionState, op: &'static str, f
         (1, false)
     };
 
-    match run_transact(&state.db, op, |tr| {
+    match run_transact(&state.db, state.shared_txn(), op, |tr| {
         let dirs = state.dirs.clone();
         let args = args.to_vec();
         async move {
@@ -522,7 +522,7 @@ pub async fn handle_llen(args: &[Bytes], state: &ConnectionState) -> RespValue {
         return RespValue::err(CommandError::WrongArity { name: "LLEN".into() }.to_string());
     }
 
-    match run_transact(&state.db, "LLEN", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "LLEN", |tr| {
         let dirs = state.dirs.clone();
         let args = args.to_vec();
         async move {
@@ -555,7 +555,7 @@ pub async fn handle_lindex(args: &[Bytes], state: &ConnectionState) -> RespValue
         Err(resp) => return resp,
     };
 
-    match run_transact(&state.db, "LINDEX", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "LINDEX", |tr| {
         let dirs = state.dirs.clone();
         let args = args.to_vec();
         async move {
@@ -609,7 +609,7 @@ pub async fn handle_lrange(args: &[Bytes], state: &ConnectionState) -> RespValue
         Err(resp) => return resp,
     };
 
-    match run_transact(&state.db, "LRANGE", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "LRANGE", |tr| {
         let dirs = state.dirs.clone();
         let args = args.to_vec();
         async move {
@@ -668,7 +668,7 @@ pub async fn handle_lset(args: &[Bytes], state: &ConnectionState) -> RespValue {
         OutOfRange,
     }
 
-    match run_transact(&state.db, "LSET", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "LSET", |tr| {
         let dirs = state.dirs.clone();
         let args = args.to_vec();
         async move {
@@ -728,7 +728,7 @@ pub async fn handle_ltrim(args: &[Bytes], state: &ConnectionState) -> RespValue 
         Err(resp) => return resp,
     };
 
-    match run_transact(&state.db, "LTRIM", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "LTRIM", |tr| {
         let dirs = state.dirs.clone();
         let args = args.to_vec();
         async move {
@@ -844,7 +844,7 @@ pub async fn handle_lrem(args: &[Bytes], state: &ConnectionState) -> RespValue {
         Err(resp) => return resp,
     };
 
-    match run_transact(&state.db, "LREM", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "LREM", |tr| {
         let dirs = state.dirs.clone();
         let args = args.to_vec();
         async move {
@@ -937,7 +937,7 @@ pub async fn handle_linsert(args: &[Bytes], state: &ConnectionState) -> RespValu
         _ => return RespValue::err("ERR syntax error"),
     };
 
-    match run_transact(&state.db, "LINSERT", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "LINSERT", |tr| {
         let dirs = state.dirs.clone();
         let args = args.to_vec();
         async move {
@@ -1044,7 +1044,7 @@ pub async fn handle_lpos(args: &[Bytes], state: &ConnectionState) -> RespValue {
 
     // Two return shapes: single-value (no COUNT) or array (with COUNT).
     // We compute the array-of-matches internally, then convert.
-    match run_transact(&state.db, "LPOS", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "LPOS", |tr| {
         let dirs = state.dirs.clone();
         let args = args.to_vec();
         async move {
@@ -1182,7 +1182,7 @@ pub async fn handle_lmove(args: &[Bytes], state: &ConnectionState) -> RespValue 
         Err(resp) => return resp,
     };
 
-    match run_transact(&state.db, "LMOVE", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "LMOVE", |tr| {
         let dirs = state.dirs.clone();
         let args = args.to_vec();
         async move {
@@ -1355,7 +1355,7 @@ pub async fn handle_lmpop(args: &[Bytes], state: &ConnectionState) -> RespValue 
         _ => return RespValue::err("ERR syntax error"),
     };
 
-    match run_transact(&state.db, "LMPOP", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "LMPOP", |tr| {
         let dirs = state.dirs.clone();
         let args = args.to_vec();
         async move {

@@ -90,7 +90,7 @@ async fn scan_one_namespace(
 
     // Step 2: Delete expired keys in a write transaction.
     let dirs_clone = dirs.clone();
-    crate::storage::run_transact(db, "EXPIRE_CLEANUP", |tr| {
+    crate::storage::run_transact(db, None, "EXPIRE_CLEANUP", |tr| {
         let dirs = dirs_clone.clone();
         let keys = expired_keys.clone();
         async move {

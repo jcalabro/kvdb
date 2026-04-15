@@ -537,7 +537,7 @@ pub async fn handle_zadd(args: &[Bytes], state: &ConnectionState) -> RespValue {
     let lt = flags.lt;
     let ch = flags.ch;
 
-    match run_transact(&state.db, "ZADD", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "ZADD", |tr| {
         let dirs = state.dirs.clone();
         let key = key.clone();
         let pairs = pairs.clone();
@@ -608,7 +608,7 @@ pub async fn handle_zcard(args: &[Bytes], state: &ConnectionState) -> RespValue 
         return RespValue::err(CommandError::WrongArity { name: "ZCARD".into() }.to_string());
     }
 
-    match run_transact(&state.db, "ZCARD", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "ZCARD", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         async move {
@@ -636,7 +636,7 @@ pub async fn handle_zscore(args: &[Bytes], state: &ConnectionState) -> RespValue
         return RespValue::err(CommandError::WrongArity { name: "ZSCORE".into() }.to_string());
     }
 
-    match run_transact(&state.db, "ZSCORE", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "ZSCORE", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         let member = args[1].clone();
@@ -669,7 +669,7 @@ pub async fn handle_zrem(args: &[Bytes], state: &ConnectionState) -> RespValue {
         return RespValue::err(CommandError::WrongArity { name: "ZREM".into() }.to_string());
     }
 
-    match run_transact(&state.db, "ZREM", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "ZREM", |tr| {
         let dirs = state.dirs.clone();
         let args = args.to_vec();
         async move {
@@ -717,7 +717,7 @@ async fn handle_rank_impl(args: &[Bytes], state: &ConnectionState, cmd_name: &'s
         return RespValue::err(CommandError::WrongArity { name: cmd_name.into() }.to_string());
     }
 
-    match run_transact(&state.db, cmd_name, |tr| {
+    match run_transact(&state.db, state.shared_txn(), cmd_name, |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         let member = args[1].clone();
@@ -787,7 +787,7 @@ pub async fn handle_zincrby(args: &[Bytes], state: &ConnectionState) -> RespValu
         Err(e) => return RespValue::err(e.to_string()),
     };
 
-    match run_transact(&state.db, "ZINCRBY", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "ZINCRBY", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         let member = args[2].clone();
@@ -862,7 +862,7 @@ async fn handle_range_by_rank(
         false
     };
 
-    match run_transact(&state.db, cmd_name, |tr| {
+    match run_transact(&state.db, state.shared_txn(), cmd_name, |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         async move {
@@ -948,7 +948,7 @@ pub async fn handle_zcount(args: &[Bytes], state: &ConnectionState) -> RespValue
         Err(e) => return RespValue::err(e.to_string()),
     };
 
-    match run_transact(&state.db, "ZCOUNT", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "ZCOUNT", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         let min = min.clone();
@@ -1001,7 +1001,7 @@ pub async fn handle_zlexcount(args: &[Bytes], state: &ConnectionState) -> RespVa
         Err(e) => return RespValue::err(e.to_string()),
     };
 
-    match run_transact(&state.db, "ZLEXCOUNT", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "ZLEXCOUNT", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         let min = min.clone();
@@ -1139,7 +1139,7 @@ pub async fn handle_zrangebyscore(args: &[Bytes], state: &ConnectionState) -> Re
         Err(e) => return RespValue::err(e.to_string()),
     };
 
-    match run_transact(&state.db, "ZRANGEBYSCORE", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "ZRANGEBYSCORE", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         let min = min.clone();
@@ -1213,7 +1213,7 @@ pub async fn handle_zrangebylex(args: &[Bytes], state: &ConnectionState) -> Resp
         Err(e) => return RespValue::err(e.to_string()),
     };
 
-    match run_transact(&state.db, "ZRANGEBYLEX", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "ZRANGEBYLEX", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         let min = min.clone();
@@ -1278,7 +1278,7 @@ pub async fn handle_zremrangebyrank(args: &[Bytes], state: &ConnectionState) -> 
         None => return RespValue::err("ERR value is not an integer or out of range"),
     };
 
-    match run_transact(&state.db, "ZREMRANGEBYRANK", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "ZREMRANGEBYRANK", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         async move {
@@ -1355,7 +1355,7 @@ pub async fn handle_zremrangebyscore(args: &[Bytes], state: &ConnectionState) ->
         Err(e) => return RespValue::err(e.to_string()),
     };
 
-    match run_transact(&state.db, "ZREMRANGEBYSCORE", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "ZREMRANGEBYSCORE", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         let min = min.clone();
@@ -1416,7 +1416,7 @@ pub async fn handle_zremrangebylex(args: &[Bytes], state: &ConnectionState) -> R
         Err(e) => return RespValue::err(e.to_string()),
     };
 
-    match run_transact(&state.db, "ZREMRANGEBYLEX", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "ZREMRANGEBYLEX", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         let min = min.clone();
@@ -1476,7 +1476,7 @@ async fn handle_zpop_impl(args: &[Bytes], state: &ConnectionState, cmd_name: &'s
         1
     };
 
-    match run_transact(&state.db, cmd_name, |tr| {
+    match run_transact(&state.db, state.shared_txn(), cmd_name, |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         async move {
@@ -1570,7 +1570,7 @@ pub async fn handle_zrandmember(args: &[Bytes], state: &ConnectionState) -> Resp
         false
     };
 
-    match run_transact(&state.db, "ZRANDMEMBER", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "ZRANDMEMBER", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         async move {
@@ -1668,7 +1668,7 @@ pub async fn handle_zmscore(args: &[Bytes], state: &ConnectionState) -> RespValu
         return RespValue::err(CommandError::WrongArity { name: "ZMSCORE".into() }.to_string());
     }
 
-    match run_transact(&state.db, "ZMSCORE", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "ZMSCORE", |tr| {
         let dirs = state.dirs.clone();
         let args = args.to_vec();
         async move {

@@ -11,6 +11,7 @@ pub mod lists;
 pub mod sets;
 pub mod sorted_sets;
 pub mod strings;
+pub mod transaction;
 pub(crate) mod util;
 
 use bytes::Bytes;
@@ -48,7 +49,27 @@ pub enum CommandResponse {
 /// The command name is already uppercased by `RedisCommand::from_resp()`.
 /// Returns a `CommandResponse` indicating the response to send and
 /// whether the connection should be closed.
+///
+/// When inside a MULTI block (`state.transaction.is_some()`), most
+/// commands are queued instead of executed immediately. Only
+/// transaction-control commands (MULTI, EXEC, DISCARD, WATCH, UNWATCH)
+/// and QUIT execute directly.
 pub async fn dispatch(cmd: &RedisCommand, state: &mut ConnectionState) -> CommandResponse {
+    // If inside a MULTI block, intercept commands for queuing.
+    if state.transaction.is_some() {
+        match cmd.name.as_ref() {
+            // These commands execute immediately even inside MULTI.
+            b"EXEC" => return CommandResponse::Reply(transaction::handle_exec(&cmd.args, state).await),
+            b"DISCARD" => return CommandResponse::Reply(transaction::handle_discard(&cmd.args, state)),
+            b"MULTI" => return CommandResponse::Reply(RespValue::err("ERR MULTI calls can not be nested")),
+            b"WATCH" => return CommandResponse::Reply(RespValue::err("ERR WATCH inside MULTI is not allowed")),
+            b"UNWATCH" => return CommandResponse::Reply(transaction::handle_unwatch(&cmd.args, state)),
+            b"QUIT" => return CommandResponse::Close(RespValue::ok()),
+            // Everything else gets queued.
+            _ => return CommandResponse::Reply(transaction::queue_command(cmd.clone(), state)),
+        }
+    }
+
     match cmd.name.as_ref() {
         b"PING" => CommandResponse::Reply(handle_ping(&cmd.args)),
         b"ECHO" => CommandResponse::Reply(handle_echo(&cmd.args)),
@@ -93,6 +114,11 @@ pub async fn dispatch(cmd: &RedisCommand, state: &mut ConnectionState) -> Comman
         b"SELECT" => CommandResponse::Reply(keys::handle_select(&cmd.args, state).await),
         b"FLUSHDB" => CommandResponse::Reply(keys::handle_flushdb(&cmd.args, state).await),
         b"FLUSHALL" => CommandResponse::Reply(keys::handle_flushall(&cmd.args, state).await),
+        b"MULTI" => CommandResponse::Reply(transaction::handle_multi(&cmd.args, state)),
+        b"EXEC" => CommandResponse::Reply(transaction::handle_exec(&cmd.args, state).await),
+        b"DISCARD" => CommandResponse::Reply(transaction::handle_discard(&cmd.args, state)),
+        b"WATCH" => CommandResponse::Reply(transaction::handle_watch(&cmd.args, state).await),
+        b"UNWATCH" => CommandResponse::Reply(transaction::handle_unwatch(&cmd.args, state)),
         b"HSET" => CommandResponse::Reply(hashes::handle_hset(&cmd.args, state).await),
         b"HGET" => CommandResponse::Reply(hashes::handle_hget(&cmd.args, state).await),
         b"HDEL" => CommandResponse::Reply(hashes::handle_hdel(&cmd.args, state).await),

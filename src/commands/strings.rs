@@ -25,7 +25,7 @@ pub async fn handle_get(args: &[Bytes], state: &ConnectionState) -> RespValue {
     if args.len() != 1 {
         return RespValue::err(CommandError::WrongArity { name: "GET".into() }.to_string());
     }
-    match run_transact(&state.db, "GET", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "GET", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         async move {
@@ -226,7 +226,7 @@ pub async fn handle_set(args: &[Bytes], state: &ConnectionState) -> RespValue {
         Err(resp) => return resp,
     };
 
-    match run_transact(&state.db, "SET", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "SET", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         let value = args[1].clone();
@@ -333,7 +333,7 @@ pub async fn handle_del(args: &[Bytes], state: &ConnectionState) -> RespValue {
         return RespValue::err(CommandError::WrongArity { name: "DEL".into() }.to_string());
     }
 
-    match run_transact(&state.db, "DEL", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "DEL", |tr| {
         let dirs = state.dirs.clone();
         let keys: Vec<Bytes> = args.to_vec();
         async move {
@@ -367,7 +367,7 @@ pub async fn handle_exists(args: &[Bytes], state: &ConnectionState) -> RespValue
         return RespValue::err(CommandError::WrongArity { name: "EXISTS".into() }.to_string());
     }
 
-    match run_transact(&state.db, "EXISTS", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "EXISTS", |tr| {
         let dirs = state.dirs.clone();
         let keys: Vec<Bytes> = args.to_vec();
         async move {
@@ -401,7 +401,7 @@ pub async fn handle_setnx(args: &[Bytes], state: &ConnectionState) -> RespValue 
         return RespValue::err(CommandError::WrongArity { name: "SETNX".into() }.to_string());
     }
 
-    match run_transact(&state.db, "SETNX", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "SETNX", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         let value = args[1].clone();
@@ -443,7 +443,7 @@ pub async fn handle_setex(args: &[Bytes], state: &ConnectionState) -> RespValue 
 
     let secs = seconds as u64;
 
-    match run_transact(&state.db, "SETEX", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "SETEX", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         let value = args[2].clone();
@@ -482,7 +482,7 @@ pub async fn handle_psetex(args: &[Bytes], state: &ConnectionState) -> RespValue
 
     let millis = ms as u64;
 
-    match run_transact(&state.db, "PSETEX", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "PSETEX", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         let value = args[2].clone();
@@ -514,7 +514,7 @@ pub async fn handle_getdel(args: &[Bytes], state: &ConnectionState) -> RespValue
         return RespValue::err(CommandError::WrongArity { name: "GETDEL".into() }.to_string());
     }
 
-    match run_transact(&state.db, "GETDEL", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "GETDEL", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         async move {
@@ -553,7 +553,7 @@ pub async fn handle_mget(args: &[Bytes], state: &ConnectionState) -> RespValue {
         return RespValue::err(CommandError::WrongArity { name: "MGET".into() }.to_string());
     }
 
-    match run_transact(&state.db, "MGET", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "MGET", |tr| {
         let dirs = state.dirs.clone();
         let keys: Vec<Bytes> = args.to_vec();
         async move {
@@ -624,7 +624,7 @@ pub async fn handle_mset(args: &[Bytes], state: &ConnectionState) -> RespValue {
         return RespValue::err(CommandError::WrongArity { name: "MSET".into() }.to_string());
     }
 
-    match run_transact(&state.db, "MSET", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "MSET", |tr| {
         let dirs = state.dirs.clone();
         let pairs: Vec<(Bytes, Bytes)> = args
             .chunks(2)
@@ -658,7 +658,7 @@ pub async fn handle_mset(args: &[Bytes], state: &ConnectionState) -> RespValue {
 /// adds `delta`, writes back as a decimal string, and returns the new value.
 /// Preserves existing TTL.
 async fn incr_by_impl(key: Bytes, delta: i64, state: &ConnectionState, cmd_name: &'static str) -> RespValue {
-    match run_transact(&state.db, cmd_name, |tr| {
+    match run_transact(&state.db, state.shared_txn(), cmd_name, |tr| {
         let dirs = state.dirs.clone();
         let k = key.clone();
         async move {
@@ -813,7 +813,7 @@ pub async fn handle_incrbyfloat(args: &[Bytes], state: &ConnectionState) -> Resp
         return RespValue::err("ERR increment would produce NaN or Infinity");
     }
 
-    match run_transact(&state.db, "INCRBYFLOAT", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "INCRBYFLOAT", |tr| {
         let dirs = state.dirs.clone();
         let k = args[0].clone();
         let inc = increment;
@@ -883,7 +883,7 @@ pub async fn handle_append(args: &[Bytes], state: &ConnectionState) -> RespValue
         return RespValue::err(CommandError::WrongArity { name: "APPEND".into() }.to_string());
     }
 
-    match run_transact(&state.db, "APPEND", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "APPEND", |tr| {
         let dirs = state.dirs.clone();
         let k = args[0].clone();
         let av = args[1].clone();
@@ -940,7 +940,7 @@ pub async fn handle_strlen(args: &[Bytes], state: &ConnectionState) -> RespValue
         return RespValue::err(CommandError::WrongArity { name: "STRLEN".into() }.to_string());
     }
 
-    match run_transact(&state.db, "STRLEN", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "STRLEN", |tr| {
         let dirs = state.dirs.clone();
         let k = args[0].clone();
         async move {
@@ -991,7 +991,7 @@ pub async fn handle_getrange(args: &[Bytes], state: &ConnectionState) -> RespVal
         Err(resp) => return resp,
     };
 
-    match run_transact(&state.db, "GETRANGE", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "GETRANGE", |tr| {
         let dirs = state.dirs.clone();
         let k = args[0].clone();
         async move {
@@ -1063,7 +1063,7 @@ pub async fn handle_setrange(args: &[Bytes], state: &ConnectionState) -> RespVal
         return RespValue::err("ERR string exceeds maximum allowed size");
     }
 
-    match run_transact(&state.db, "SETRANGE", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "SETRANGE", |tr| {
         let dirs = state.dirs.clone();
         let k = args[0].clone();
         let p = args[2].clone();

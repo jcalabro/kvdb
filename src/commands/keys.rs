@@ -27,7 +27,7 @@ pub async fn handle_ttl(args: &[Bytes], state: &ConnectionState) -> RespValue {
     if args.len() != 1 {
         return RespValue::err(CommandError::WrongArity { name: "TTL".into() }.to_string());
     }
-    match run_transact(&state.db, "TTL", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "TTL", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         async move {
@@ -68,7 +68,7 @@ pub async fn handle_pttl(args: &[Bytes], state: &ConnectionState) -> RespValue {
     if args.len() != 1 {
         return RespValue::err(CommandError::WrongArity { name: "PTTL".into() }.to_string());
     }
-    match run_transact(&state.db, "PTTL", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "PTTL", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         async move {
@@ -114,7 +114,7 @@ pub async fn handle_expiretime(args: &[Bytes], state: &ConnectionState) -> RespV
             .to_string(),
         );
     }
-    match run_transact(&state.db, "EXPIRETIME", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "EXPIRETIME", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         async move {
@@ -157,7 +157,7 @@ pub async fn handle_pexpiretime(args: &[Bytes], state: &ConnectionState) -> Resp
             .to_string(),
         );
     }
-    match run_transact(&state.db, "PEXPIRETIME", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "PEXPIRETIME", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         async move {
@@ -202,7 +202,7 @@ fn parse_i64_arg(arg: &[u8]) -> Result<i64, CommandError> {
 /// - 1 if the key exists and the expiry was set
 /// - 0 if the key does not exist or has already expired
 async fn set_expire(key: &[u8], expires_at_ms: u64, state: &ConnectionState, command_name: &'static str) -> RespValue {
-    match run_transact(&state.db, command_name, |tr| {
+    match run_transact(&state.db, state.shared_txn(), command_name, |tr| {
         let dirs = state.dirs.clone();
         let key = Bytes::copy_from_slice(key);
         async move {
@@ -394,7 +394,7 @@ pub async fn handle_persist(args: &[Bytes], state: &ConnectionState) -> RespValu
         return RespValue::err(CommandError::WrongArity { name: "PERSIST".into() }.to_string());
     }
 
-    match run_transact(&state.db, "PERSIST", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "PERSIST", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         async move {
@@ -444,7 +444,7 @@ pub async fn handle_type(args: &[Bytes], state: &ConnectionState) -> RespValue {
         return RespValue::err(CommandError::WrongArity { name: "TYPE".into() }.to_string());
     }
 
-    match run_transact(&state.db, "TYPE", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "TYPE", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         async move {
@@ -479,7 +479,7 @@ pub async fn handle_unlink(args: &[Bytes], state: &ConnectionState) -> RespValue
         return RespValue::err(CommandError::WrongArity { name: "UNLINK".into() }.to_string());
     }
 
-    match run_transact(&state.db, "UNLINK", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "UNLINK", |tr| {
         let dirs = state.dirs.clone();
         let keys: Vec<Bytes> = args.to_vec();
         async move {
@@ -515,7 +515,7 @@ pub async fn handle_touch(args: &[Bytes], state: &ConnectionState) -> RespValue 
         return RespValue::err(CommandError::WrongArity { name: "TOUCH".into() }.to_string());
     }
 
-    match run_transact(&state.db, "TOUCH", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "TOUCH", |tr| {
         let dirs = state.dirs.clone();
         let keys: Vec<Bytes> = args.to_vec();
         async move {
@@ -551,7 +551,7 @@ pub async fn handle_dbsize(args: &[Bytes], state: &ConnectionState) -> RespValue
         return RespValue::err(CommandError::WrongArity { name: "DBSIZE".into() }.to_string());
     }
 
-    match run_transact(&state.db, "DBSIZE", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "DBSIZE", |tr| {
         let dirs = state.dirs.clone();
         async move {
             let now = helpers::now_ms();
@@ -593,7 +593,7 @@ pub async fn handle_rename(args: &[Bytes], state: &ConnectionState) -> RespValue
         return RespValue::err(CommandError::WrongArity { name: "RENAME".into() }.to_string());
     }
 
-    match run_transact(&state.db, "RENAME", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "RENAME", |tr| {
         let dirs = state.dirs.clone();
         let src_key = args[0].clone();
         let dst_key = args[1].clone();
@@ -632,7 +632,7 @@ pub async fn handle_renamenx(args: &[Bytes], state: &ConnectionState) -> RespVal
         );
     }
 
-    match run_transact(&state.db, "RENAMENX", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "RENAMENX", |tr| {
         let dirs = state.dirs.clone();
         let src_key = args[0].clone();
         let dst_key = args[1].clone();
@@ -791,7 +791,7 @@ pub async fn handle_flushdb(args: &[Bytes], state: &ConnectionState) -> RespValu
         return RespValue::err(CommandError::WrongArity { name: "FLUSHDB".into() }.to_string());
     }
 
-    match run_transact(&state.db, "FLUSHDB", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "FLUSHDB", |tr| {
         let dirs = state.dirs.clone();
         async move {
             flush_namespace(&tr, &dirs);
@@ -827,7 +827,7 @@ pub async fn handle_flushall(args: &[Bytes], state: &ConnectionState) -> RespVal
     // Get all cached namespaces.
     let all_dirs = state.ns_cache.cached_namespaces().await;
 
-    match run_transact(&state.db, "FLUSHALL", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "FLUSHALL", |tr| {
         let dirs_list = all_dirs.clone();
         async move {
             for dirs in &dirs_list {

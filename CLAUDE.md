@@ -38,16 +38,16 @@ Client ←RESP→ Server → Commands → Storage → FoundationDB
 
 **`protocol/`** — RESP3/RESP2 parser and encoder. Zero-copy parsing via `bytes::BytesMut`. The `RespValue` enum covers all RESP2+RESP3 wire types. `RedisCommand` is the parsed form used by dispatch.
 
-**`server/`** — Tokio TCP listener with semaphore-based connection limiting. One task per connection. Each connection tracks its protocol version (2/3) and selected database namespace (0-15).
+**`server/`** — Tokio TCP listener with semaphore-based connection limiting. One task per connection. Each connection tracks its protocol version (2/3), selected database namespace (0-15), and optional MULTI/EXEC transaction state (queued commands, watched keys with meta snapshots).
 
-**`commands/`** — Command dispatch: case-insensitive name lookup, delegates to per-command handlers. Returns `RespValue` responses.
+**`commands/`** — Command dispatch: case-insensitive name lookup, delegates to per-command handlers. Returns `RespValue` responses. `transaction.rs` implements MULTI/EXEC/DISCARD/WATCH/UNWATCH.
 
 **`storage/`** — FDB integration layer:
 - `database.rs` — FDB connection lifecycle
 - `directories.rs` — FDB directory layout per namespace (`meta/`, `obj/`, `hash/`, `set/`, `zset/`, `zset_idx/`, `list/`, `expire/`)
 - `meta.rs` — `ObjectMeta` struct read on every command for type enforcement, chunk tracking, and TTL checking
 - `chunking.rs` — Transparent value splitting at 100,000-byte boundaries (FDB's hard limit)
-- `transaction.rs` — Transaction wrapper with metrics
+- `transaction.rs` — Transaction wrapper with metrics; supports shared-transaction mode for MULTI/EXEC (via `run_transact` with `shared_tr` parameter)
 
 **`observability/`** — Composable tracing + metrics + profiling:
 - `tracing_init.rs` — Builds a `Vec<Box<dyn Layer<Registry>>>` from EnvFilter + fmt (text/JSON) + Tracy (opt-in) + OpenTelemetry (opt-in), applied in one `.with()` call to avoid nested `Layered<>` type issues.
@@ -65,7 +65,8 @@ Client ←RESP→ Server → Commands → Storage → FoundationDB
 - **One Redis command = one FDB transaction** (except MULTI/EXEC which batches).
 - **Every command reads ObjectMeta first** — this enforces type safety (WRONGTYPE errors), checks TTL expiry, and locates chunked data. It's a mandatory per-command cost.
 - **Redis no-rollback semantics**: MULTI/EXEC must emulate Redis's partial-execution behavior (command errors don't abort the transaction), even though FDB is all-or-nothing by default.
-- **WATCH uses snapshot reads**: FDB's conflict detection is broader than Redis WATCH. Only explicitly WATCHed keys go in the conflict set; all other reads within a transaction use snapshot reads.
+- **WATCH uses meta snapshot comparison**: At WATCH time, the raw ObjectMeta bytes are snapshot-read and stored. At EXEC time, the current meta is re-read and compared — if different, the transaction aborts (returns nil). This correctly detects modifications by other clients regardless of FDB transaction read versions.
+- **MULTI/EXEC 5-second limit**: All queued commands execute in a single FDB transaction, subject to FDB's 5-second timeout and 10MB transaction size limit. This is a documented limitation.
 
 ## FDB Key Layout
 

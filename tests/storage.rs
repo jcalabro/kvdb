@@ -339,7 +339,7 @@ async fn run_transact_write_then_read() {
     let data = b"trx_value";
 
     let d = dirs.clone();
-    run_transact(&db, "test_write", |tr| {
+    run_transact(&db, None, "test_write", |tr| {
         let d = d.clone();
         async move {
             let meta = ObjectMeta::new_string(1, data.len() as u64);
@@ -353,7 +353,7 @@ async fn run_transact_write_then_read() {
     .unwrap();
 
     let d = dirs.clone();
-    let result = run_transact(&db, "test_read", |tr| {
+    let result = run_transact(&db, None, "test_read", |tr| {
         let d = d.clone();
         async move {
             let meta = ObjectMeta::read(&tr, &d, key, 0, false)

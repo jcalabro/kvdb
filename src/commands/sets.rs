@@ -147,7 +147,7 @@ pub async fn handle_sadd(args: &[Bytes], state: &ConnectionState) -> RespValue {
         return RespValue::err(CommandError::WrongArity { name: "SADD".into() }.to_string());
     }
 
-    match run_transact(&state.db, "SADD", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "SADD", |tr| {
         let dirs = state.dirs.clone();
         let args = args.to_vec();
         async move {
@@ -210,7 +210,7 @@ pub async fn handle_srem(args: &[Bytes], state: &ConnectionState) -> RespValue {
         return RespValue::err(CommandError::WrongArity { name: "SREM".into() }.to_string());
     }
 
-    match run_transact(&state.db, "SREM", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "SREM", |tr| {
         let dirs = state.dirs.clone();
         let args = args.to_vec();
         async move {
@@ -292,7 +292,7 @@ pub async fn handle_sismember(args: &[Bytes], state: &ConnectionState) -> RespVa
         );
     }
 
-    match run_transact(&state.db, "SISMEMBER", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "SISMEMBER", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         let member = args[1].clone();
@@ -338,7 +338,7 @@ pub async fn handle_smismember(args: &[Bytes], state: &ConnectionState) -> RespV
         );
     }
 
-    match run_transact(&state.db, "SMISMEMBER", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "SMISMEMBER", |tr| {
         let dirs = state.dirs.clone();
         let args = args.to_vec();
         async move {
@@ -389,7 +389,7 @@ pub async fn handle_scard(args: &[Bytes], state: &ConnectionState) -> RespValue 
         return RespValue::err(CommandError::WrongArity { name: "SCARD".into() }.to_string());
     }
 
-    match run_transact(&state.db, "SCARD", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "SCARD", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         async move {
@@ -425,7 +425,7 @@ pub async fn handle_smembers(args: &[Bytes], state: &ConnectionState) -> RespVal
         );
     }
 
-    match run_transact(&state.db, "SMEMBERS", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "SMEMBERS", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         async move {
@@ -485,7 +485,7 @@ pub async fn handle_spop(args: &[Bytes], state: &ConnectionState) -> RespValue {
         return RespValue::Array(Some(vec![]));
     }
 
-    match run_transact(&state.db, "SPOP", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "SPOP", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         async move {
@@ -607,7 +607,7 @@ pub async fn handle_srandmember(args: &[Bytes], state: &ConnectionState) -> Resp
         0 // unused when has_count is false
     };
 
-    match run_transact(&state.db, "SRANDMEMBER", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "SRANDMEMBER", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         async move {
@@ -696,7 +696,7 @@ pub async fn handle_smove(args: &[Bytes], state: &ConnectionState) -> RespValue 
         return RespValue::err(CommandError::WrongArity { name: "SMOVE".into() }.to_string());
     }
 
-    match run_transact(&state.db, "SMOVE", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "SMOVE", |tr| {
         let dirs = state.dirs.clone();
         let source = args[0].clone();
         let destination = args[1].clone();
@@ -820,7 +820,7 @@ async fn multi_set_op<F>(
 where
     F: Fn(Vec<HashSet<Vec<u8>>>) -> Vec<Vec<u8>> + Send + Clone + 'static,
 {
-    run_transact(&state.db, operation, |tr| {
+    run_transact(&state.db, state.shared_txn(), operation, |tr| {
         let dirs = state.dirs.clone();
         let args = args.to_vec();
         let op = op.clone();
@@ -999,7 +999,7 @@ where
     let destination = args[0].clone();
     let source_keys = args[1..].to_vec();
 
-    match run_transact(&state.db, operation, |tr| {
+    match run_transact(&state.db, state.shared_txn(), operation, |tr| {
         let dirs = state.dirs.clone();
         let dest = destination.clone();
         let sources = source_keys.clone();
@@ -1134,7 +1134,7 @@ pub async fn handle_sintercard(args: &[Bytes], state: &ConnectionState) -> RespV
         return RespValue::err("ERR syntax error");
     };
 
-    match run_transact(&state.db, "SINTERCARD", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "SINTERCARD", |tr| {
         let dirs = state.dirs.clone();
         let keys: Vec<Bytes> = set_keys.to_vec();
         async move {

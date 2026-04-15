@@ -9,8 +9,10 @@
 //! buffer are parsed and dispatched before flushing responses.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
+use foundationdb::Transaction;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, warn};
@@ -31,11 +33,51 @@ const INITIAL_BUF_CAPACITY: usize = 8 * 1024;
 /// workload.
 const MAX_READ_BUF_SIZE: usize = 64 * 1024 * 1024;
 
+/// A watched key and its meta snapshot taken at WATCH time.
+///
+/// At EXEC time we re-read the meta and compare — if it changed,
+/// the transaction is aborted (optimistic lock failure).
+#[derive(Debug, Clone)]
+pub struct WatchedKey {
+    /// The Redis key being watched.
+    pub key: Bytes,
+    /// The raw serialized ObjectMeta bytes at WATCH time, or `None`
+    /// if the key did not exist.
+    pub meta_snapshot: Option<Vec<u8>>,
+}
+
+/// State for a Redis MULTI/EXEC transaction.
+///
+/// Tracks queued commands, watched keys, and whether a syntax error
+/// was encountered during queuing (which causes EXEC to abort).
+pub struct TransactionState {
+    /// Commands queued between MULTI and EXEC.
+    pub queued: Vec<RedisCommand>,
+    /// Keys being WATCHed with their meta snapshots.
+    pub watched: Vec<WatchedKey>,
+    /// Set `true` if any command queued during MULTI had a syntax error.
+    /// When set, EXEC will refuse to execute and return EXECABORT.
+    pub error_flag: bool,
+}
+
+impl TransactionState {
+    /// Create a new transaction state, carrying over any previously
+    /// WATCHed keys with their snapshots.
+    pub fn new(watched: Vec<WatchedKey>) -> Self {
+        Self {
+            queued: Vec::new(),
+            watched,
+            error_flag: false,
+        }
+    }
+}
+
 /// Per-connection state.
 ///
-/// Tracks the negotiated protocol version, selected database, and FDB
-/// handles. Passed to command handlers so they can read/modify connection
-/// properties and access the storage layer.
+/// Tracks the negotiated protocol version, selected database, FDB
+/// handles, and optional MULTI/EXEC transaction state. Passed to
+/// command handlers so they can read/modify connection properties
+/// and access the storage layer.
 pub struct ConnectionState {
     /// RESP protocol version (2 or 3). Starts at 2; upgraded via HELLO.
     pub protocol_version: u8,
@@ -47,9 +89,27 @@ pub struct ConnectionState {
     pub dirs: Directories,
     /// Shared cache of opened directory handles for all namespaces.
     pub ns_cache: NamespaceCache,
+    /// MULTI/EXEC transaction state. `Some` when inside a MULTI block.
+    pub transaction: Option<TransactionState>,
+    /// Keys being WATCHed outside of a MULTI block (with their meta
+    /// snapshots taken at WATCH time). Moved into `TransactionState`
+    /// when MULTI is issued, and cleared on EXEC / DISCARD / UNWATCH.
+    pub watched_keys: Vec<WatchedKey>,
+    /// When executing queued commands inside EXEC, this holds the
+    /// shared FDB transaction. Handlers detect this and use it instead
+    /// of creating their own transaction via `run_transact`.
+    pub active_transaction: Option<Arc<Transaction>>,
 }
 
 impl ConnectionState {
+    /// Returns the active shared FDB transaction, if inside MULTI/EXEC.
+    ///
+    /// Command handlers pass this to `run_transact` so that queued
+    /// commands within an EXEC block share a single FDB transaction.
+    pub fn shared_txn(&self) -> Option<&Arc<Transaction>> {
+        self.active_transaction.as_ref()
+    }
+
     /// Create a new connection state with the given FDB handles.
     pub fn new(db: Database, dirs: Directories, ns_cache: NamespaceCache) -> Self {
         Self {
@@ -58,6 +118,9 @@ impl ConnectionState {
             db,
             dirs,
             ns_cache,
+            transaction: None,
+            watched_keys: Vec::new(),
+            active_transaction: None,
         }
     }
 
@@ -98,6 +161,9 @@ impl ConnectionState {
             db: db.clone(),
             dirs: dirs.clone(),
             ns_cache: ns_cache.clone(),
+            transaction: None,
+            watched_keys: Vec::new(),
+            active_transaction: None,
         }
     }
 }
@@ -235,6 +301,11 @@ fn metric_label_for_command(name: &[u8]) -> &'static str {
         b"SELECT" => "SELECT",
         b"FLUSHDB" => "FLUSHDB",
         b"FLUSHALL" => "FLUSHALL",
+        b"MULTI" => "MULTI",
+        b"EXEC" => "EXEC",
+        b"DISCARD" => "DISCARD",
+        b"WATCH" => "WATCH",
+        b"UNWATCH" => "UNWATCH",
         _ => "UNKNOWN",
     }
 }

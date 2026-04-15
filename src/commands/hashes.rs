@@ -75,7 +75,7 @@ pub async fn handle_hset(args: &[Bytes], state: &ConnectionState) -> RespValue {
         return RespValue::err(CommandError::WrongArity { name: "HSET".into() }.to_string());
     }
 
-    match run_transact(&state.db, "HSET", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "HSET", |tr| {
         let dirs = state.dirs.clone();
         let args = args.to_vec();
         async move {
@@ -155,7 +155,7 @@ pub async fn handle_hget(args: &[Bytes], state: &ConnectionState) -> RespValue {
         return RespValue::err(CommandError::WrongArity { name: "HGET".into() }.to_string());
     }
 
-    match run_transact(&state.db, "HGET", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "HGET", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         let field = args[1].clone();
@@ -206,7 +206,7 @@ pub async fn handle_hdel(args: &[Bytes], state: &ConnectionState) -> RespValue {
         return RespValue::err(CommandError::WrongArity { name: "HDEL".into() }.to_string());
     }
 
-    match run_transact(&state.db, "HDEL", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "HDEL", |tr| {
         let dirs = state.dirs.clone();
         let args = args.to_vec();
         async move {
@@ -274,7 +274,7 @@ pub async fn handle_hexists(args: &[Bytes], state: &ConnectionState) -> RespValu
         return RespValue::err(CommandError::WrongArity { name: "HEXISTS".into() }.to_string());
     }
 
-    match run_transact(&state.db, "HEXISTS", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "HEXISTS", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         let field = args[1].clone();
@@ -322,7 +322,7 @@ pub async fn handle_hlen(args: &[Bytes], state: &ConnectionState) -> RespValue {
         return RespValue::err(CommandError::WrongArity { name: "HLEN".into() }.to_string());
     }
 
-    match run_transact(&state.db, "HLEN", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "HLEN", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         async move {
@@ -362,7 +362,7 @@ pub async fn handle_hgetall(args: &[Bytes], state: &ConnectionState) -> RespValu
         return RespValue::err(CommandError::WrongArity { name: "HGETALL".into() }.to_string());
     }
 
-    match run_transact(&state.db, "HGETALL", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "HGETALL", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         async move {
@@ -415,7 +415,7 @@ pub async fn handle_hkeys(args: &[Bytes], state: &ConnectionState) -> RespValue 
         return RespValue::err(CommandError::WrongArity { name: "HKEYS".into() }.to_string());
     }
 
-    match run_transact(&state.db, "HKEYS", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "HKEYS", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         async move {
@@ -462,7 +462,7 @@ pub async fn handle_hvals(args: &[Bytes], state: &ConnectionState) -> RespValue 
         return RespValue::err(CommandError::WrongArity { name: "HVALS".into() }.to_string());
     }
 
-    match run_transact(&state.db, "HVALS", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "HVALS", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         async move {
@@ -510,7 +510,7 @@ pub async fn handle_hmget(args: &[Bytes], state: &ConnectionState) -> RespValue 
         return RespValue::err(CommandError::WrongArity { name: "HMGET".into() }.to_string());
     }
 
-    match run_transact(&state.db, "HMGET", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "HMGET", |tr| {
         let dirs = state.dirs.clone();
         let args = args.to_vec();
         async move {
@@ -605,7 +605,7 @@ pub async fn handle_hincrby(args: &[Bytes], state: &ConnectionState) -> RespValu
         Err(resp) => return resp,
     };
 
-    match run_transact(&state.db, "HINCRBY", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "HINCRBY", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         let field = args[1].clone();
@@ -720,7 +720,7 @@ pub async fn handle_hincrbyfloat(args: &[Bytes], state: &ConnectionState) -> Res
         return RespValue::err("ERR increment would produce NaN or Infinity");
     }
 
-    match run_transact(&state.db, "HINCRBYFLOAT", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "HINCRBYFLOAT", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         let field = args[1].clone();
@@ -813,7 +813,7 @@ pub async fn handle_hsetnx(args: &[Bytes], state: &ConnectionState) -> RespValue
         return RespValue::err(CommandError::WrongArity { name: "HSETNX".into() }.to_string());
     }
 
-    match run_transact(&state.db, "HSETNX", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "HSETNX", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         let field = args[1].clone();
@@ -884,7 +884,7 @@ pub async fn handle_hstrlen(args: &[Bytes], state: &ConnectionState) -> RespValu
         return RespValue::err(CommandError::WrongArity { name: "HSTRLEN".into() }.to_string());
     }
 
-    match run_transact(&state.db, "HSTRLEN", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "HSTRLEN", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         let field = args[1].clone();
@@ -968,7 +968,7 @@ pub async fn handle_hrandfield(args: &[Bytes], state: &ConnectionState) -> RespV
         return RespValue::err("ERR syntax error");
     }
 
-    match run_transact(&state.db, "HRANDFIELD", |tr| {
+    match run_transact(&state.db, state.shared_txn(), "HRANDFIELD", |tr| {
         let dirs = state.dirs.clone();
         let key = args[0].clone();
         async move {
