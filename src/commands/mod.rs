@@ -138,6 +138,10 @@ pub async fn dispatch(cmd: &RedisCommand, state: &mut ConnectionState) -> Comman
         b"LREM" => CommandResponse::Reply(lists::handle_lrem(&cmd.args, state).await),
         b"LINSERT" => CommandResponse::Reply(lists::handle_linsert(&cmd.args, state).await),
         b"LPOS" => CommandResponse::Reply(lists::handle_lpos(&cmd.args, state).await),
+        b"ZADD" => CommandResponse::Reply(sorted_sets::handle_zadd(&cmd.args, state).await),
+        b"ZCARD" => CommandResponse::Reply(sorted_sets::handle_zcard(&cmd.args, state).await),
+        b"ZSCORE" => CommandResponse::Reply(sorted_sets::handle_zscore(&cmd.args, state).await),
+        b"ZREM" => CommandResponse::Reply(sorted_sets::handle_zrem(&cmd.args, state).await),
         _ => {
             let name_str = sanitize_for_error(&cmd.name);
             let mut msg = format!("ERR unknown command '{name_str}', with args beginning with:");

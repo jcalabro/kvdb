@@ -12,16 +12,16 @@
 //! cardinality are kept in sync within each FDB transaction.
 //! Empty sorted sets are deleted per Redis semantics.
 
-// These helpers are building blocks for command handlers in later tasks.
-// They are pub(crate) and will be used once ZADD, ZRANGE, etc. land.
-#![allow(dead_code)]
-
+use bytes::Bytes;
 use foundationdb::{FdbBindingError, RangeOption, Transaction};
 
 use crate::error::CommandError;
+use crate::protocol::types::RespValue;
+use crate::server::connection::ConnectionState;
 use crate::storage::directories::Directories;
 use crate::storage::helpers;
 use crate::storage::meta::{KeyType, ObjectMeta};
+use crate::storage::run_transact;
 
 // ---------------------------------------------------------------------------
 // Score bound types and parsing
@@ -29,6 +29,7 @@ use crate::storage::meta::{KeyType, ObjectMeta};
 
 /// A bound for score-based range queries (ZRANGEBYSCORE, ZCOUNT, etc.).
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub(crate) enum ScoreBound {
     NegInf,
     PosInf,
@@ -38,6 +39,7 @@ pub(crate) enum ScoreBound {
 
 /// A bound for lexicographic range queries (ZRANGEBYLEX, ZLEXCOUNT, etc.).
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub(crate) enum LexBound {
     NegInf,
     PosInf,
@@ -50,6 +52,7 @@ pub(crate) enum LexBound {
 /// - `-inf`, `+inf`, `inf` (case insensitive) → NegInf / PosInf
 /// - `(1.5` → Exclusive(1.5)
 /// - `1.5` → Inclusive(1.5)
+#[allow(dead_code)]
 pub(crate) fn parse_score_bound(arg: &[u8]) -> Result<ScoreBound, CommandError> {
     let s = std::str::from_utf8(arg).map_err(|_| CommandError::Generic("invalid score bound".into()))?;
 
@@ -79,6 +82,7 @@ pub(crate) fn parse_score_bound(arg: &[u8]) -> Result<ScoreBound, CommandError> 
 /// - `+` → PosInf
 /// - `[value` → Inclusive(value)
 /// - `(value` → Exclusive(value)
+#[allow(dead_code)]
 pub(crate) fn parse_lex_bound(arg: &[u8]) -> Result<LexBound, CommandError> {
     if arg.is_empty() {
         return Err(CommandError::Generic(
@@ -108,6 +112,7 @@ pub(crate) fn parse_lex_bound(arg: &[u8]) -> Result<LexBound, CommandError> {
 // ---------------------------------------------------------------------------
 
 /// Returns `true` if `score >= bound` (inclusive) or `score > bound` (exclusive).
+#[allow(dead_code)]
 pub(crate) fn score_gte_bound(score: f64, bound: &ScoreBound) -> bool {
     match bound {
         ScoreBound::NegInf => true,
@@ -118,6 +123,7 @@ pub(crate) fn score_gte_bound(score: f64, bound: &ScoreBound) -> bool {
 }
 
 /// Returns `true` if `score <= bound` (inclusive) or `score < bound` (exclusive).
+#[allow(dead_code)]
 pub(crate) fn score_lte_bound(score: f64, bound: &ScoreBound) -> bool {
     match bound {
         ScoreBound::NegInf => false,
@@ -128,11 +134,13 @@ pub(crate) fn score_lte_bound(score: f64, bound: &ScoreBound) -> bool {
 }
 
 /// Returns `true` if `score` is within the range `[min, max]`.
+#[allow(dead_code)]
 pub(crate) fn score_in_range(score: f64, min: &ScoreBound, max: &ScoreBound) -> bool {
     score_gte_bound(score, min) && score_lte_bound(score, max)
 }
 
 /// Returns `true` if `member >= bound` (inclusive) or `member > bound` (exclusive).
+#[allow(dead_code)]
 pub(crate) fn member_gte_lex_bound(member: &[u8], bound: &LexBound) -> bool {
     match bound {
         LexBound::NegInf => true,
@@ -143,6 +151,7 @@ pub(crate) fn member_gte_lex_bound(member: &[u8], bound: &LexBound) -> bool {
 }
 
 /// Returns `true` if `member <= bound` (inclusive) or `member < bound` (exclusive).
+#[allow(dead_code)]
 pub(crate) fn member_lte_lex_bound(member: &[u8], bound: &LexBound) -> bool {
     match bound {
         LexBound::NegInf => false,
@@ -153,6 +162,7 @@ pub(crate) fn member_lte_lex_bound(member: &[u8], bound: &LexBound) -> bool {
 }
 
 /// Returns `true` if `member` is within the lex range `[min, max]`.
+#[allow(dead_code)]
 pub(crate) fn member_in_lex_range(member: &[u8], min: &LexBound, max: &LexBound) -> bool {
     member_gte_lex_bound(member, min) && member_lte_lex_bound(member, max)
 }
@@ -370,6 +380,7 @@ pub(crate) async fn zset_get_score(
 ///
 /// Returns `Vec<(score, member)>` ordered by (score, member).
 /// Uses the `zset/<key, score, member>` index for natural ordering.
+#[allow(dead_code)]
 pub(crate) async fn read_zset_members_by_score(
     tr: &Transaction,
     dirs: &Directories,
@@ -434,6 +445,268 @@ pub(crate) fn write_or_delete_zset_meta(
 }
 
 // ---------------------------------------------------------------------------
+// ZADD key [NX|XX] [GT|LT] [CH] score member [score member ...]
+// ---------------------------------------------------------------------------
+
+/// ZADD flags parsed from the command arguments.
+struct ZaddFlags {
+    nx: bool,
+    xx: bool,
+    gt: bool,
+    lt: bool,
+    ch: bool,
+}
+
+/// Parse ZADD flags from the arguments after the key.
+///
+/// Flags come before the score-member pairs and are case-insensitive.
+/// Returns the parsed flags and the index of the first score argument.
+fn parse_zadd_flags(args: &[Bytes]) -> Result<(ZaddFlags, usize), CommandError> {
+    let mut flags = ZaddFlags {
+        nx: false,
+        xx: false,
+        gt: false,
+        lt: false,
+        ch: false,
+    };
+
+    let mut i = 0;
+    while i < args.len() {
+        let upper = args[i].to_ascii_uppercase();
+        match upper.as_slice() {
+            b"NX" => flags.nx = true,
+            b"XX" => flags.xx = true,
+            b"GT" => flags.gt = true,
+            b"LT" => flags.lt = true,
+            b"CH" => flags.ch = true,
+            _ => break, // First non-flag argument — must be a score.
+        }
+        i += 1;
+    }
+
+    // Validate flag combinations.
+    if flags.nx && flags.xx {
+        return Err(CommandError::Generic(
+            "ERR XX and NX options at the same time are not compatible".into(),
+        ));
+    }
+    if flags.nx && (flags.gt || flags.lt) {
+        return Err(CommandError::Generic(
+            "ERR GT, LT, and NX options at the same time are not compatible".into(),
+        ));
+    }
+
+    Ok((flags, i))
+}
+
+/// ZADD key [NX|XX] [GT|LT] [CH] score member [score member ...]
+///
+/// Add or update members in a sorted set. Returns the number of members
+/// added (or added+updated with CH flag).
+pub async fn handle_zadd(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    // Need at least: key score member
+    if args.len() < 3 {
+        return RespValue::err(CommandError::WrongArity { name: "ZADD".into() }.to_string());
+    }
+
+    let key = &args[0];
+
+    // Parse flags from args[1..].
+    let (flags, flag_end) = match parse_zadd_flags(&args[1..]) {
+        Ok(v) => v,
+        Err(e) => return RespValue::err(e.to_string()),
+    };
+
+    let score_member_args = &args[1 + flag_end..];
+
+    // Must have at least one score-member pair, and even count.
+    if score_member_args.is_empty() || !score_member_args.len().is_multiple_of(2) {
+        return RespValue::err(CommandError::WrongArity { name: "ZADD".into() }.to_string());
+    }
+
+    // Pre-parse all scores before entering the transaction.
+    let mut pairs: Vec<(f64, Bytes)> = Vec::with_capacity(score_member_args.len() / 2);
+    for chunk in score_member_args.chunks(2) {
+        let score = match parse_score_arg(&chunk[0]) {
+            Ok(s) => s,
+            Err(e) => return RespValue::err(e.to_string()),
+        };
+        pairs.push((score, chunk[1].clone()));
+    }
+
+    let nx = flags.nx;
+    let xx = flags.xx;
+    let gt = flags.gt;
+    let lt = flags.lt;
+    let ch = flags.ch;
+
+    match run_transact(&state.db, "ZADD", |tr| {
+        let dirs = state.dirs.clone();
+        let key = key.clone();
+        let pairs = pairs.clone();
+        async move {
+            let (live_meta, old_cardinality, _old_expires_at_ms) = read_zset_meta_for_write(&tr, &dirs, &key).await?;
+
+            let mut added: i64 = 0;
+            let mut updated: i64 = 0;
+
+            for (score, member) in &pairs {
+                let existing_score = zset_get_score(&tr, &dirs, &key, member, false).await?;
+
+                match existing_score {
+                    Some(old_score) => {
+                        // Member exists. NX means skip updates.
+                        if nx {
+                            continue;
+                        }
+                        // GT: only update if new score > old score.
+                        if gt && *score <= old_score {
+                            continue;
+                        }
+                        // LT: only update if new score < old score.
+                        if lt && *score >= old_score {
+                            continue;
+                        }
+                        // Score unchanged — no update needed.
+                        if old_score.to_bits() == score.to_bits() {
+                            continue;
+                        }
+                        zset_set_member(&tr, &dirs, &key, member, *score, Some(old_score));
+                        updated += 1;
+                    }
+                    None => {
+                        // Member doesn't exist. XX means skip new members.
+                        if xx {
+                            continue;
+                        }
+                        zset_set_member(&tr, &dirs, &key, member, *score, None);
+                        added += 1;
+                    }
+                }
+            }
+
+            let new_cardinality = (old_cardinality as i64 + added) as u64;
+            write_or_delete_zset_meta(&tr, &dirs, &key, live_meta.as_ref(), new_cardinality)?;
+
+            let result = if ch { added + updated } else { added };
+            Ok(result)
+        }
+    })
+    .await
+    {
+        Ok(count) => RespValue::Integer(count),
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ZCARD key
+// ---------------------------------------------------------------------------
+
+/// ZCARD key — Returns the cardinality of a sorted set.
+///
+/// Returns 0 if the key doesn't exist.
+pub async fn handle_zcard(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.len() != 1 {
+        return RespValue::err(CommandError::WrongArity { name: "ZCARD".into() }.to_string());
+    }
+
+    match run_transact(&state.db, "ZCARD", |tr| {
+        let dirs = state.dirs.clone();
+        let key = args[0].clone();
+        async move {
+            let meta = read_zset_meta_for_read(&tr, &dirs, &key).await?;
+            Ok(meta.map_or(0i64, |m| m.cardinality as i64))
+        }
+    })
+    .await
+    {
+        Ok(card) => RespValue::Integer(card),
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ZSCORE key member
+// ---------------------------------------------------------------------------
+
+/// ZSCORE key member — Returns the score of a member in a sorted set.
+///
+/// Returns a bulk string with the score, or Nil if the member or key
+/// doesn't exist.
+pub async fn handle_zscore(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.len() != 2 {
+        return RespValue::err(CommandError::WrongArity { name: "ZSCORE".into() }.to_string());
+    }
+
+    match run_transact(&state.db, "ZSCORE", |tr| {
+        let dirs = state.dirs.clone();
+        let key = args[0].clone();
+        let member = args[1].clone();
+        async move {
+            let meta = read_zset_meta_for_read(&tr, &dirs, &key).await?;
+            if meta.is_none() {
+                return Ok(None);
+            }
+            zset_get_score(&tr, &dirs, &key, &member, false).await
+        }
+    })
+    .await
+    {
+        Ok(Some(score)) => RespValue::BulkString(Some(Bytes::from(format_score(score)))),
+        Ok(None) => RespValue::BulkString(None),
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ZREM key member [member ...]
+// ---------------------------------------------------------------------------
+
+/// ZREM key member [member ...] — Remove members from a sorted set.
+///
+/// Returns the number of members actually removed. If all members are
+/// removed, the key itself is deleted.
+pub async fn handle_zrem(args: &[Bytes], state: &ConnectionState) -> RespValue {
+    if args.len() < 2 {
+        return RespValue::err(CommandError::WrongArity { name: "ZREM".into() }.to_string());
+    }
+
+    match run_transact(&state.db, "ZREM", |tr| {
+        let dirs = state.dirs.clone();
+        let args = args.to_vec();
+        async move {
+            let key = &args[0];
+            let (live_meta, old_cardinality, _old_expires_at_ms) = read_zset_meta_for_write(&tr, &dirs, key).await?;
+
+            if live_meta.is_none() {
+                return Ok(0i64);
+            }
+
+            let mut removed: i64 = 0;
+
+            for member in &args[1..] {
+                let score = zset_get_score(&tr, &dirs, key, member, false).await?;
+                if let Some(s) = score {
+                    zset_remove_member(&tr, &dirs, key, member, s);
+                    removed += 1;
+                }
+            }
+
+            let new_cardinality = (old_cardinality as i64 - removed) as u64;
+            write_or_delete_zset_meta(&tr, &dirs, key, live_meta.as_ref(), new_cardinality)?;
+
+            Ok(removed)
+        }
+    })
+    .await
+    {
+        Ok(count) => RespValue::Integer(count),
+        Err(e) => helpers::storage_err_to_resp(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -489,22 +762,13 @@ mod tests {
 
     #[test]
     fn parse_lex_inclusive() {
-        assert_eq!(
-            parse_lex_bound(b"[abc").unwrap(),
-            LexBound::Inclusive(b"abc".to_vec())
-        );
-        assert_eq!(
-            parse_lex_bound(b"[").unwrap(),
-            LexBound::Inclusive(b"".to_vec())
-        );
+        assert_eq!(parse_lex_bound(b"[abc").unwrap(), LexBound::Inclusive(b"abc".to_vec()));
+        assert_eq!(parse_lex_bound(b"[").unwrap(), LexBound::Inclusive(b"".to_vec()));
     }
 
     #[test]
     fn parse_lex_exclusive() {
-        assert_eq!(
-            parse_lex_bound(b"(abc").unwrap(),
-            LexBound::Exclusive(b"abc".to_vec())
-        );
+        assert_eq!(parse_lex_bound(b"(abc").unwrap(), LexBound::Exclusive(b"abc".to_vec()));
     }
 
     #[test]
@@ -638,15 +902,21 @@ mod tests {
 
     #[test]
     fn score_bytes_roundtrip() {
-        let cases = [0.0, -0.0, 1.0, -1.0, f64::INFINITY, f64::NEG_INFINITY, 1e100, -1e100, 0.1];
+        let cases = [
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            1e100,
+            -1e100,
+            0.1,
+        ];
         for score in cases {
             let bytes = score_to_bytes(score);
             let decoded = score_from_bytes(&bytes).unwrap();
-            assert_eq!(
-                score.to_bits(),
-                decoded.to_bits(),
-                "roundtrip failed for {score}"
-            );
+            assert_eq!(score.to_bits(), decoded.to_bits(), "roundtrip failed for {score}");
         }
     }
 
