@@ -549,6 +549,240 @@ async fn psubscribe_wrong_arity() {
     assert!(result.is_err());
 }
 
+// ── PUNSUBSCRIBE ────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn punsubscribe_wrong_arity() {
+    let ctx = TestContext::new().await;
+    let con = ctx.connection().await;
+    // PUNSUBSCRIBE with no active pattern subscriptions should still succeed
+    // (returns empty confirmation), not be an error.
+    // Verify at the wire level so we don't fight redis-rs abstraction.
+    let mut stream = tokio::net::TcpStream::connect(ctx.addr).await.unwrap();
+    let resp = raw_command(&mut stream, b"*1\r\n$12\r\nPUNSUBSCRIBE\r\n").await;
+    let s = String::from_utf8_lossy(&resp);
+    // Should return an array (empty confirmation), not an error.
+    assert!(
+        !s.starts_with('-'),
+        "PUNSUBSCRIBE with no args should not error, got: {s:?}"
+    );
+    drop(con);
+}
+
+#[tokio::test]
+async fn punsubscribe_all_at_once() {
+    let ctx = TestContext::new().await;
+    let mut pub_con = ctx.connection().await;
+    let mut sub_con = ctx.client.get_async_pubsub().await.unwrap();
+
+    sub_con.psubscribe(&["pat1.*", "pat2.*"]).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Verify patterns are registered.
+    let before: i64 = redis::cmd("PUBSUB")
+        .arg("NUMPAT")
+        .query_async(&mut pub_con)
+        .await
+        .unwrap();
+    assert!(before >= 2, "expected >=2 patterns, got {before}");
+
+    sub_con.punsubscribe(&["pat1.*", "pat2.*"]).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let after: i64 = redis::cmd("PUBSUB")
+        .arg("NUMPAT")
+        .query_async(&mut pub_con)
+        .await
+        .unwrap();
+    assert_eq!(after, before - 2, "patterns should be removed after PUNSUBSCRIBE");
+
+    // Messages to matching channels should no longer be delivered.
+    let count: i64 = redis::cmd("PUBLISH")
+        .arg("pat1.foo")
+        .arg("no_one_listening")
+        .query_async(&mut pub_con)
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "PUBLISH after PUNSUBSCRIBE should find 0 receivers");
+}
+
+// ── Double-subscribe idempotency ───────────────────────────────────────────
+
+#[tokio::test]
+async fn double_subscribe_is_idempotent() {
+    // Subscribing to the same channel twice on the same connection
+    // must not create duplicate watcher tasks or double-deliver messages.
+    let ctx = TestContext::new().await;
+    let mut pub_con = ctx.connection().await;
+    let mut stream = tokio::net::TcpStream::connect(ctx.addr).await.unwrap();
+
+    // Subscribe to "idem" twice in separate commands.
+    let r1 = raw_command(&mut stream, b"*2\r\n$9\r\nSUBSCRIBE\r\n$4\r\nidem\r\n").await;
+    let r2 = raw_command(&mut stream, b"*2\r\n$9\r\nSUBSCRIBE\r\n$4\r\nidem\r\n").await;
+    let s1 = String::from_utf8_lossy(&r1);
+    let s2 = String::from_utf8_lossy(&r2);
+    // Both subscribe responses should be non-error.
+    assert!(!s1.starts_with('-'), "first SUBSCRIBE should not error: {s1:?}");
+    assert!(!s2.starts_with('-'), "second SUBSCRIBE should not error: {s2:?}");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // PUBSUB NUMSUB should show exactly 1 subscriber, not 2.
+    let numsub: Vec<redis::Value> = redis::cmd("PUBSUB")
+        .arg("NUMSUB")
+        .arg("idem")
+        .query_async(&mut pub_con)
+        .await
+        .unwrap();
+    if let Some(redis::Value::Int(count)) = numsub.get(1) {
+        assert_eq!(*count, 1, "double-subscribe must not create 2 entries");
+    }
+
+    // Publish one message — should arrive exactly once.
+    let _: i64 = redis::cmd("PUBLISH")
+        .arg("idem")
+        .arg("once")
+        .query_async(&mut pub_con)
+        .await
+        .unwrap();
+
+    // Read with a short timeout. A second copy would arrive within the window.
+    let mut buf = vec![0u8; 4096];
+    let n = tokio::time::timeout(
+        Duration::from_millis(200),
+        tokio::io::AsyncReadExt::read(&mut stream, &mut buf),
+    )
+    .await
+    .expect("timed out waiting for first message")
+    .unwrap();
+    let first = String::from_utf8_lossy(&buf[..n]).into_owned();
+    assert!(first.contains("once"), "expected message 'once', got: {first:?}");
+
+    // Second read should time out — no duplicate.
+    let second = tokio::time::timeout(
+        Duration::from_millis(200),
+        tokio::io::AsyncReadExt::read(&mut stream, &mut buf),
+    )
+    .await;
+    assert!(second.is_err(), "message delivered twice (duplicate watcher task)");
+}
+
+// ── RESET exits pub/sub mode ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn reset_exits_pubsub_mode() {
+    // RESET while subscribed must:
+    //  1. Return "+RESET"
+    //  2. Clear all subscriptions (PUBLISH count → 0)
+    //  3. Allow normal commands on the same connection afterwards
+    let ctx = TestContext::new().await;
+    let mut pub_con = ctx.connection().await;
+    let mut stream = tokio::net::TcpStream::connect(ctx.addr).await.unwrap();
+
+    // Subscribe — raw_command sends the command and reads the confirmation,
+    // leaving the TCP stream buffer empty before we send RESET.
+    let sub_resp = raw_command(&mut stream, b"*2\r\n$9\r\nSUBSCRIBE\r\n$5\r\nreset\r\n").await;
+    let sub_str = String::from_utf8_lossy(&sub_resp);
+    assert!(
+        sub_str.contains("subscribe"),
+        "expected subscribe confirmation, got: {sub_str:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Verify subscription is active via a separate connection.
+    // We avoid publishing here: a published message would arrive in the
+    // stream's TCP buffer and be read as the RESET response instead.
+    let channels: Vec<String> = redis::cmd("PUBSUB")
+        .arg("CHANNELS")
+        .arg("reset")
+        .query_async(&mut pub_con)
+        .await
+        .unwrap();
+    assert!(
+        channels.contains(&"reset".to_string()),
+        "channel 'reset' should be active before RESET"
+    );
+
+    // Send RESET — stream buffer is empty so the first read is the RESET reply.
+    let resp = raw_command(&mut stream, b"*1\r\n$5\r\nRESET\r\n").await;
+    let s = String::from_utf8_lossy(&resp);
+    assert!(s.contains("RESET"), "RESET should return '+RESET', got: {s:?}");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // After RESET, pub/sub subscription should be gone.
+    let after: i64 = redis::cmd("PUBLISH")
+        .arg("reset")
+        .arg("nobody")
+        .query_async(&mut pub_con)
+        .await
+        .unwrap();
+    assert_eq!(after, 0, "subscription should be cleared after RESET");
+
+    // After RESET, normal commands should work on the same connection.
+    let pong = raw_command(&mut stream, b"*1\r\n$4\r\nPING\r\n").await;
+    let s = String::from_utf8_lossy(&pong);
+    assert!(s.contains("PONG"), "normal PING should work after RESET, got: {s:?}");
+}
+
+#[tokio::test]
+async fn reset_then_resubscribe_delivers_new_messages_only() {
+    // RESET followed by a new SUBSCRIBE must not replay messages published
+    // between RESET and the new subscription.
+    let ctx = TestContext::new().await;
+    let mut pub_con = ctx.connection().await;
+    let mut stream = tokio::net::TcpStream::connect(ctx.addr).await.unwrap();
+
+    // First subscription.
+    let _ = raw_command(&mut stream, b"*2\r\n$9\r\nSUBSCRIBE\r\n$8\r\nreset_ch\r\n").await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // RESET exits pub/sub mode.
+    let _ = raw_command(&mut stream, b"*1\r\n$5\r\nRESET\r\n").await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Publish while unsubscribed — must not be received later.
+    let _: i64 = redis::cmd("PUBLISH")
+        .arg("reset_ch")
+        .arg("lost_message")
+        .query_async(&mut pub_con)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Re-subscribe.
+    let _ = raw_command(&mut stream, b"*2\r\n$9\r\nSUBSCRIBE\r\n$8\r\nreset_ch\r\n").await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Publish one message after re-subscribing.
+    let _: i64 = redis::cmd("PUBLISH")
+        .arg("reset_ch")
+        .arg("new_message")
+        .query_async(&mut pub_con)
+        .await
+        .unwrap();
+
+    // Receive — should be "new_message", not "lost_message".
+    let mut buf = vec![0u8; 4096];
+    let n = tokio::time::timeout(
+        Duration::from_secs(3),
+        tokio::io::AsyncReadExt::read(&mut stream, &mut buf),
+    )
+    .await
+    .expect("timed out waiting for message after RESET+re-subscribe")
+    .unwrap();
+    let msg = String::from_utf8_lossy(&buf[..n]);
+    assert!(
+        msg.contains("new_message"),
+        "should receive new_message after re-subscribe, got: {msg:?}"
+    );
+    assert!(
+        !msg.contains("lost_message"),
+        "should NOT receive message published while unsubscribed"
+    );
+}
+
 // ── UNSUBSCRIBE with no args exits pub/sub mode ────────────────────────────
 
 #[tokio::test]

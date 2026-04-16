@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use futures::StreamExt;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use redis::AsyncCommands;
@@ -2234,6 +2235,168 @@ async fn run_validate(addr: &str) -> bool {
         .arg("smoke_str_for_zset")
         .query_async(&mut con)
         .await;
+
+    // -- PUB/SUB ------------------------------------------------------------
+    println!("PUB/SUB");
+
+    // PUBLISH with no subscribers returns 0.
+    let result: redis::RedisResult<i64> = redis::cmd("PUBLISH")
+        .arg("smoke_ch")
+        .arg("before_sub")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("PUBLISH no subscribers → 0", result, 0);
+
+    // PUBLISH wrong arity.
+    let result: redis::RedisResult<i64> = redis::cmd("PUBLISH").arg("smoke_ch").query_async(&mut con).await;
+    t.check_err("PUBLISH wrong arity (1 arg)", result);
+
+    // Open a dedicated pub/sub connection.
+    let mut sub_con = match client.get_async_pubsub().await {
+        Ok(c) => c,
+        Err(e) => {
+            t.fail("PUB/SUB open sub connection", &format!("{e:?}"));
+            return t.summary();
+        }
+    };
+
+    // SUBSCRIBE and confirm the response.
+    if let Err(e) = sub_con.subscribe("smoke_ch").await {
+        t.fail("SUBSCRIBE smoke_ch", &format!("{e:?}"));
+        return t.summary();
+    }
+    t.pass("SUBSCRIBE smoke_ch");
+
+    // PUBLISH finds 1 subscriber.
+    let result: redis::RedisResult<i64> = redis::cmd("PUBLISH")
+        .arg("smoke_ch")
+        .arg("hello")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("PUBLISH to 1 subscriber → 1", result, 1);
+
+    // Receive the message within 3 seconds.
+    match tokio::time::timeout(Duration::from_secs(3), sub_con.on_message().next()).await {
+        Ok(Some(msg)) => {
+            let ch = msg.get_channel_name();
+            let payload: String = msg.get_payload().unwrap_or_default();
+            if ch == "smoke_ch" && payload == "hello" {
+                t.pass("SUBSCRIBE receives message");
+            } else {
+                t.fail(
+                    "SUBSCRIBE receives message",
+                    &format!("got channel={ch:?} payload={payload:?}"),
+                );
+            }
+        }
+        Ok(None) => t.fail("SUBSCRIBE receives message", "stream ended unexpectedly"),
+        Err(_) => t.fail("SUBSCRIBE receives message", "timed out waiting for message"),
+    }
+
+    // UNSUBSCRIBE and verify PUBLISH returns 0 again.
+    if let Err(e) = sub_con.unsubscribe("smoke_ch").await {
+        t.fail("UNSUBSCRIBE smoke_ch", &format!("{e:?}"));
+    } else {
+        t.pass("UNSUBSCRIBE smoke_ch");
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let result: redis::RedisResult<i64> = redis::cmd("PUBLISH")
+        .arg("smoke_ch")
+        .arg("after_unsub")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("PUBLISH after UNSUBSCRIBE → 0", result, 0);
+
+    // PSUBSCRIBE with glob pattern.
+    if let Err(e) = sub_con.psubscribe("smoke.*").await {
+        t.fail("PSUBSCRIBE smoke.*", &format!("{e:?}"));
+        return t.summary();
+    }
+    t.pass("PSUBSCRIBE smoke.*");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // PUBLISH to a matching channel.
+    let _: redis::RedisResult<i64> = redis::cmd("PUBLISH")
+        .arg("smoke.events")
+        .arg("pattern_msg")
+        .query_async(&mut con)
+        .await;
+
+    match tokio::time::timeout(Duration::from_secs(3), sub_con.on_message().next()).await {
+        Ok(Some(msg)) => {
+            let payload: String = msg.get_payload().unwrap_or_default();
+            if payload == "pattern_msg" {
+                t.pass("PSUBSCRIBE receives pattern-matched message");
+            } else {
+                t.fail(
+                    "PSUBSCRIBE receives pattern-matched message",
+                    &format!("unexpected payload: {payload:?}"),
+                );
+            }
+        }
+        Ok(None) => t.fail("PSUBSCRIBE receives pattern-matched message", "stream ended"),
+        Err(_) => t.fail("PSUBSCRIBE receives pattern-matched message", "timed out waiting"),
+    }
+
+    // PUNSUBSCRIBE.
+    if let Err(e) = sub_con.punsubscribe("smoke.*").await {
+        t.fail("PUNSUBSCRIBE smoke.*", &format!("{e:?}"));
+    } else {
+        t.pass("PUNSUBSCRIBE smoke.*");
+    }
+
+    // PUBSUB CHANNELS — use a separate fresh connection to avoid
+    // the dedicated pub/sub connection type restriction.
+    let mut sub_con2 = match client.get_async_pubsub().await {
+        Ok(c) => c,
+        Err(e) => {
+            t.fail("PUBSUB CHANNELS open connection", &format!("{e:?}"));
+            return t.summary();
+        }
+    };
+    if let Err(e) = sub_con2.subscribe("smoke_pubsub_ch").await {
+        t.fail("SUBSCRIBE smoke_pubsub_ch", &format!("{e:?}"));
+        return t.summary();
+    }
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let result: redis::RedisResult<Vec<String>> = redis::cmd("PUBSUB").arg("CHANNELS").query_async(&mut con).await;
+    match result {
+        Ok(chs) if chs.contains(&"smoke_pubsub_ch".to_string()) => t.pass("PUBSUB CHANNELS lists active channel"),
+        Ok(chs) => t.fail(
+            "PUBSUB CHANNELS lists active channel",
+            &format!("channel not found in {chs:?}"),
+        ),
+        Err(e) => t.fail("PUBSUB CHANNELS lists active channel", &format!("{e:?}")),
+    }
+
+    // PUBSUB NUMSUB.
+    let result: redis::RedisResult<Vec<redis::Value>> = redis::cmd("PUBSUB")
+        .arg("NUMSUB")
+        .arg("smoke_pubsub_ch")
+        .query_async(&mut con)
+        .await;
+    match result {
+        Ok(vals) if vals.len() == 2 => t.pass("PUBSUB NUMSUB returns count pair"),
+        Ok(vals) => t.fail("PUBSUB NUMSUB", &format!("expected 2 values, got {vals:?}")),
+        Err(e) => t.fail("PUBSUB NUMSUB", &format!("{e:?}")),
+    }
+
+    // PUBSUB NUMPAT.
+    let result: redis::RedisResult<i64> = redis::cmd("PUBSUB").arg("NUMPAT").query_async(&mut con).await;
+    match result {
+        Ok(_) => t.pass("PUBSUB NUMPAT returns integer"),
+        Err(e) => t.fail("PUBSUB NUMPAT", &format!("{e:?}")),
+    }
+
+    // SUBSCRIBE wrong arity.
+    let result: redis::RedisResult<redis::Value> = redis::cmd("SUBSCRIBE").query_async(&mut con).await;
+    t.check_err("SUBSCRIBE wrong arity (0 args)", result);
+
+    // PSUBSCRIBE wrong arity.
+    let result: redis::RedisResult<redis::Value> = redis::cmd("PSUBSCRIBE").query_async(&mut con).await;
+    t.check_err("PSUBSCRIBE wrong arity (0 args)", result);
 
     // -- Post-error liveness check ------------------------------------------
     let result: redis::RedisResult<String> = redis::cmd("PING").query_async(&mut con).await;

@@ -361,3 +361,78 @@ async fn accept_pubsub_concurrent_publishers_no_corruption() {
         }
     }
 }
+
+/// Accept test: no messages delivered after UNSUBSCRIBE.
+///
+/// Publishes N messages to a channel while subscribed, receives them,
+/// then unsubscribes and publishes N more. Asserts that the second batch
+/// is never delivered. This is the canonical test for watcher-task
+/// cancellation correctness.
+#[tokio::test]
+async fn accept_pubsub_no_delivery_after_unsubscribe() {
+    const N: usize = 5;
+
+    let ctx = TestContext::new().await;
+    let mut pub_con = ctx.connection().await;
+    let mut sub_con = ctx.client.get_async_pubsub().await.unwrap();
+
+    sub_con.subscribe("no_delivery_after_unsub").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Phase 1: publish and receive N messages while subscribed.
+    for i in 0..N {
+        let _: i64 = redis::cmd("PUBLISH")
+            .arg("no_delivery_after_unsub")
+            .arg(format!("before:{i}"))
+            .query_async(&mut pub_con)
+            .await
+            .unwrap();
+    }
+
+    let mut stream = sub_con.on_message();
+    for i in 0..N {
+        let msg = tokio::time::timeout(Duration::from_secs(3), stream.next())
+            .await
+            .unwrap_or_else(|_| panic!("timed out at message {i}"))
+            .expect("stream ended");
+        assert!(
+            msg.get_payload::<String>().unwrap().starts_with("before:"),
+            "unexpected payload at msg {i}"
+        );
+    }
+
+    // Phase 2: unsubscribe and publish N more messages.
+    drop(stream); // release borrow on sub_con
+    sub_con.unsubscribe("no_delivery_after_unsub").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    for i in 0..N {
+        let count: i64 = redis::cmd("PUBLISH")
+            .arg("no_delivery_after_unsub")
+            .arg(format!("after:{i}"))
+            .query_async(&mut pub_con)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "publish count should be 0 after unsubscribe (msg {i})");
+    }
+
+    // Drain any pending messages with a short window — should be none.
+    let mut received_after = Vec::new();
+    let window = tokio::time::Instant::now() + Duration::from_millis(300);
+    let mut stream = sub_con.on_message();
+    loop {
+        let remaining = window.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, stream.next()).await {
+            Ok(Some(msg)) => received_after.push(msg.get_payload::<String>().unwrap()),
+            _ => break,
+        }
+    }
+
+    assert!(
+        received_after.is_empty(),
+        "received messages after UNSUBSCRIBE: {received_after:?}"
+    );
+}
