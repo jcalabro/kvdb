@@ -16,7 +16,7 @@
 | M9: Sorted Set Commands | **Complete** | 20 commands, dual-index FDB layout, 60 integration tests, 8 acceptance tests. |
 | M9.5: Cross-Key List Commands | **Complete** | 2 commands (LMOVE, LMPOP). Cross-key atomicity via single FDB transaction. 25 integration tests, 4 acceptance tests (property-based + model). |
 | M10: Transactions | **Complete** | 5 commands, two-phase WATCH conflict detection, shared-transaction MULTI/EXEC, no-rollback semantics. 24 integration tests. |
-| M11: Pub/Sub | Not started | |
+| M11: Pub/Sub | **Complete** | SUBSCRIBE, UNSUBSCRIBE, PSUBSCRIBE, PUNSUBSCRIBE, PUBLISH, PUBSUB (CHANNELS/NUMSUB/NUMPAT). FDB-backed cross-instance delivery via versionstamp queue + FDB watches. Redis glob pattern matching. 22 integration tests, 6 acceptance tests. |
 | M12: Server Commands & Observability | Not started | |
 | M13: Compatibility Testing | Not started | |
 
@@ -281,6 +281,43 @@ Shared helper: `parse_direction()` for LEFT|RIGHT argument parsing (used by both
 - Data structure coverage: hashes, lists, sets, sorted sets inside MULTI/EXEC
 
 **`just test`**: 544 tests in ~2.0s. **`just accept`**: 76 acceptance tests in ~18s.
+
+### What's been built (M11)
+
+**Pub/Sub commands** (`src/commands/pubsub.rs`, ~250 lines) — 6 handlers:
+- **SUBSCRIBE channel [channel ...]**: Enters pub/sub mode. One confirmation Push per channel. Registers in-process subscription and spawns per-channel FDB watcher task.
+- **UNSUBSCRIBE [channel ...]**: Removes subscriptions. No-args form unsubscribes all. Exits pub/sub mode when count reaches 0.
+- **PSUBSCRIBE pattern [pattern ...]**: Glob pattern subscriptions. Spawns a global `__all__` watcher task that scans and filters on wake.
+- **PUNSUBSCRIBE [pattern ...]**: Removes pattern subscriptions. No-args form unsubscribes all patterns.
+- **PUBLISH channel message**: Writes to FDB versionstamp queue, delivers to local subscribers. Returns local delivery count (Redis standalone semantics). Rejects messages > 99,992 bytes (FDB's 100KB limit minus 8-byte instance ID prefix).
+- **PUBSUB CHANNELS/NUMSUB/NUMPAT**: Introspection. Instance-local counts.
+
+**Pub/sub module** (`src/pubsub/`) — 4 files:
+- `mod.rs` — `PubSubManager` (DashMap subscription registry, FDB publish), `PubSubDirectories` (global FDB subspaces), `PubSubMessage` enum. Metrics: active subscriptions, active patterns, messages published/delivered.
+- `pattern.rs` — Redis glob pattern matcher (`*`, `?`, `[abc]`, `[a-z]`, `[^abc]`, `\x` escape). Compiled once at PSUBSCRIBE time.
+- `subscriber.rs` — Per-channel and per-pattern FDB watcher tasks. Each task watches a notification key, reads new messages from the versionstamp queue, strips instance ID prefix, and forwards cross-instance messages.
+- `cleanup.rs` — Background worker that prunes old messages from `pubsub/msg/` using FDB read version cutoff (default 60-second retention).
+
+**FDB-backed cross-instance delivery** — hybrid watch + versionstamp queue:
+- PUBLISH: `atomic_op(SetVersionstampedKey)` + `atomic_op(Add)` — conflict-free, no read operations, ideal for hot channels
+- Value format: `[8 bytes instance_id][payload]` — watcher tasks skip messages from the local instance (already delivered via mpsc)
+- SUBSCRIBE watcher: per-channel FDB watch on `pubsub/notify/<channel>` → read from cursor forward
+- PSUBSCRIBE watcher: watches `pubsub/notify/__all__` → scans msg/ subspace, filters by pattern
+- Pub/sub directories are global (`<root>/pubsub/msg/`, `<root>/pubsub/notify/`), not per-namespace, matching Redis behavior
+
+**Connection loop** (`src/server/connection.rs`) — extended with `tokio::select!`:
+- Branch 1: socket reads (normal command processing, unchanged)
+- Branch 2: pub/sub message delivery via `recv_pubsub()` (uses `std::future::pending()` when not subscribed — zero overhead for non-subscriber connections)
+- `dispatch()` extended with pub/sub mode enforcement: rejects non-pub/sub commands when `subscription_count() > 0`
+- `CommandResponse::MultiReply` variant for SUBSCRIBE/PSUBSCRIBE responses (one Push per channel/pattern)
+
+**Pattern unit tests** — 10 tests in `src/pubsub/pattern.rs`: literal, `*`, `?`, char class, range, negation, escape, complex patterns, edge cases.
+
+**Integration tests** (`tests/pubsub.rs`) — 22 tests: basic publish/subscribe, multiple subscribers, ordering, unsubscribe stops delivery, PSUBSCRIBE patterns, pub/sub mode enforcement, PUBSUB introspection, size limit boundary, arity errors, unsubscribe-all lifecycle.
+
+**Acceptance tests** (`tests/accept_pubsub.rs`) — 6 tests: 50-message ordered delivery, pattern matching correctness matrix (5 patterns × match/no-match channels), 5-subscriber fan-out, subscribe/unsubscribe lifecycle with no-replay verification, PUBSUB CHANNELS accuracy tracking, concurrent publisher ordering invariants.
+
+**`just test`**: 589 tests in ~3.8s. **`just accept`**: 82 acceptance tests.
 
 ---
 

@@ -12,6 +12,7 @@ use tracing::{error, info};
 
 use crate::config::ServerConfig;
 use crate::observability::metrics;
+use crate::pubsub::{self, PubSubDirectories, PubSubManager, SharedPubSubManager};
 use crate::server::connection;
 use crate::storage::{Database, Directories, NamespaceCache};
 use crate::ttl;
@@ -43,12 +44,29 @@ pub async fn run(
 
     let ns_cache = NamespaceCache::new(db.clone(), root_prefix.to_string(), dirs.clone());
 
+    // Open pub/sub FDB directories (global, not per-namespace).
+    let pubsub_dirs = PubSubDirectories::open(&db, root_prefix).await?;
+    let pubsub_manager: SharedPubSubManager = Arc::new(PubSubManager::new(db.clone(), pubsub_dirs.clone()));
+
     // Spawn the background expiry worker.
     let cancel_token = CancellationToken::new();
     let worker_cancel = cancel_token.clone();
     let worker_ns_cache = ns_cache.clone();
     tokio::spawn(async move {
         ttl::worker::run(worker_ns_cache, ttl::ExpiryConfig::default(), worker_cancel).await;
+    });
+
+    // Spawn the pub/sub cleanup worker.
+    let pubsub_cleanup_cancel = cancel_token.clone();
+    let pubsub_cleanup_db = db.clone();
+    tokio::spawn(async move {
+        pubsub::cleanup::run(
+            pubsub_cleanup_db,
+            pubsub_dirs,
+            pubsub::cleanup::PubSubCleanupConfig::default(),
+            pubsub_cleanup_cancel,
+        )
+        .await;
     });
 
     let listener = match pre_bound {
@@ -83,8 +101,13 @@ pub async fn run(
                 let conn_db = db.clone();
                 let conn_dirs = dirs.clone();
                 let conn_ns_cache = ns_cache.clone();
+                let conn_pubsub = pubsub_manager.clone();
+                let conn_id = pubsub_manager.next_connection_id();
                 tokio::spawn(async move {
-                    if let Err(e) = connection::handle(socket, addr, conn_db, conn_dirs, conn_ns_cache).await {
+                    if let Err(e) = connection::handle(
+                        socket, addr, conn_db, conn_dirs, conn_ns_cache,
+                        conn_pubsub, conn_id,
+                    ).await {
                         error!(%addr, error = %e, "connection error");
                     }
                     drop(permit);

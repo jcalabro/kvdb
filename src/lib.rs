@@ -22,6 +22,7 @@ pub mod config;
 pub mod error;
 pub mod observability;
 pub mod protocol;
+pub mod pubsub;
 pub mod server;
 pub mod storage;
 pub mod ttl;

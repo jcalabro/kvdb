@@ -95,6 +95,35 @@ lazy_static::lazy_static! {
         "Time spent per background expiry scan iteration",
         vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]
     ).unwrap();
+
+    // ---- Pub/sub metrics ----
+
+    /// Total messages published, by channel.
+    pub static ref PUBSUB_MESSAGES_PUBLISHED_TOTAL: IntCounterVec =
+        prometheus::register_int_counter_vec!(
+            "kvdb_pubsub_messages_published_total",
+            "Total pub/sub messages published",
+            &["channel"]
+        ).unwrap();
+
+    /// Total messages delivered to local subscribers.
+    pub static ref PUBSUB_MESSAGES_DELIVERED_TOTAL: prometheus::IntCounter =
+        prometheus::register_int_counter!(
+            "kvdb_pubsub_messages_delivered_total",
+            "Total pub/sub messages delivered to local subscribers"
+        ).unwrap();
+
+    /// Current number of active channel subscriptions on this instance.
+    pub static ref PUBSUB_ACTIVE_SUBSCRIPTIONS: IntGauge = prometheus::register_int_gauge!(
+        "kvdb_pubsub_active_subscriptions",
+        "Active channel subscriptions on this server instance"
+    ).unwrap();
+
+    /// Current number of active pattern subscriptions on this instance.
+    pub static ref PUBSUB_ACTIVE_PATTERNS: IntGauge = prometheus::register_int_gauge!(
+        "kvdb_pubsub_active_patterns",
+        "Active PSUBSCRIBE pattern subscriptions on this server instance"
+    ).unwrap();
 }
 
 /// Register default process-level metrics (CPU, memory, file descriptors).

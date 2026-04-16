@@ -8,6 +8,7 @@
 pub mod hashes;
 pub mod keys;
 pub mod lists;
+pub mod pubsub;
 pub mod sets;
 pub mod sorted_sets;
 pub mod strings;
@@ -15,9 +16,11 @@ pub mod transaction;
 pub(crate) mod util;
 
 use bytes::Bytes;
+use tokio::sync::mpsc;
 
 use crate::error::CommandError;
 use crate::protocol::types::{RedisCommand, RespValue};
+use crate::pubsub::PubSubMessage;
 use crate::server::connection::ConnectionState;
 
 /// Sanitize a byte slice for safe embedding in RESP simple error messages.
@@ -42,6 +45,9 @@ pub enum CommandResponse {
     Reply(RespValue),
     /// Send the response and close the connection.
     Close(RespValue),
+    /// Send multiple responses (used by SUBSCRIBE/PSUBSCRIBE which
+    /// return one confirmation per channel/pattern).
+    MultiReply(Vec<RespValue>),
 }
 
 /// Dispatch a parsed command to the appropriate handler.
@@ -54,7 +60,11 @@ pub enum CommandResponse {
 /// commands are queued instead of executed immediately. Only
 /// transaction-control commands (MULTI, EXEC, DISCARD, WATCH, UNWATCH)
 /// and QUIT execute directly.
-pub async fn dispatch(cmd: &RedisCommand, state: &mut ConnectionState) -> CommandResponse {
+pub async fn dispatch(
+    cmd: &RedisCommand,
+    state: &mut ConnectionState,
+    pubsub_rx: &mut Option<mpsc::UnboundedReceiver<PubSubMessage>>,
+) -> CommandResponse {
     // If inside a MULTI block, intercept commands for queuing.
     if state.transaction.is_some() {
         match cmd.name.as_ref() {
@@ -70,8 +80,36 @@ pub async fn dispatch(cmd: &RedisCommand, state: &mut ConnectionState) -> Comman
         }
     }
 
+    // Pub/sub mode enforcement: when a connection has active subscriptions,
+    // only (P)SUBSCRIBE, (P)UNSUBSCRIBE, PING, QUIT, and RESET are allowed.
+    // Everything else returns an error. This matches Redis behavior.
+    if state.subscription_count() > 0 {
+        match cmd.name.as_ref() {
+            b"SUBSCRIBE" | b"PSUBSCRIBE" | b"UNSUBSCRIBE" | b"PUNSUBSCRIBE" | b"PING" | b"QUIT" | b"RESET" => {
+                // Allowed — fall through to normal dispatch.
+            }
+            _ => {
+                let name_str = sanitize_for_error(&cmd.name);
+                return CommandResponse::Reply(RespValue::err(format!(
+                    "ERR Command not allowed inside a subscription context. Use SUBSCRIBE, UNSUBSCRIBE, PSUBSCRIBE, PUNSUBSCRIBE, PING, QUIT or RESET. Command was '{name_str}'"
+                )));
+            }
+        }
+    }
+
     match cmd.name.as_ref() {
-        b"PING" => CommandResponse::Reply(handle_ping(&cmd.args)),
+        b"PING" => CommandResponse::Reply(if state.subscription_count() > 0 {
+            // Redis spec: PING in pub/sub mode returns a Push message
+            // ["pong", message] so clients can distinguish it from a
+            // regular command response while subscribed.
+            let msg = cmd.args.first().cloned().unwrap_or_else(|| Bytes::from_static(b""));
+            RespValue::Push(vec![
+                RespValue::BulkString(Some(Bytes::from_static(b"pong"))),
+                RespValue::BulkString(Some(msg)),
+            ])
+        } else {
+            handle_ping(&cmd.args)
+        }),
         b"ECHO" => CommandResponse::Reply(handle_echo(&cmd.args)),
         b"HELLO" => CommandResponse::Reply(handle_hello(&cmd.args, state)),
         b"QUIT" => CommandResponse::Close(RespValue::ok()),
@@ -186,6 +224,13 @@ pub async fn dispatch(cmd: &RedisCommand, state: &mut ConnectionState) -> Comman
         b"ZPOPMAX" => CommandResponse::Reply(sorted_sets::handle_zpopmax(&cmd.args, state).await),
         b"ZRANDMEMBER" => CommandResponse::Reply(sorted_sets::handle_zrandmember(&cmd.args, state).await),
         b"ZMSCORE" => CommandResponse::Reply(sorted_sets::handle_zmscore(&cmd.args, state).await),
+        b"SUBSCRIBE" => pubsub::handle_subscribe(&cmd.args, state, pubsub_rx),
+        b"UNSUBSCRIBE" => pubsub::handle_unsubscribe(&cmd.args, state),
+        b"PSUBSCRIBE" => pubsub::handle_psubscribe(&cmd.args, state, pubsub_rx),
+        b"PUNSUBSCRIBE" => pubsub::handle_punsubscribe(&cmd.args, state),
+        b"PUBLISH" => CommandResponse::Reply(pubsub::handle_publish(&cmd.args, state).await),
+        b"PUBSUB" => CommandResponse::Reply(pubsub::handle_pubsub(&cmd.args, state)),
+        b"RESET" => CommandResponse::Reply(handle_reset(state)),
         _ => {
             let name_str = sanitize_for_error(&cmd.name);
             let mut msg = format!("ERR unknown command '{name_str}', with args beginning with:");
@@ -195,6 +240,34 @@ pub async fn dispatch(cmd: &RedisCommand, state: &mut ConnectionState) -> Comman
             CommandResponse::Reply(RespValue::Error(Bytes::from(msg)))
         }
     }
+}
+
+/// RESET
+///
+/// Resets the connection to its initial state:
+/// - Cancels all pub/sub subscriptions and their watcher tasks
+/// - Resets the protocol version to RESP2
+///
+/// Returns `+RESET` (a SimpleString). Allowed in pub/sub mode so that
+/// clients can use RESET to exit pub/sub mode cleanly.
+fn handle_reset(state: &mut ConnectionState) -> RespValue {
+    // Cancel all channel watcher tasks.
+    for (_, cancel) in state.subscribed_channel_cancels.drain() {
+        cancel.cancel();
+    }
+    // Cancel all pattern watcher tasks.
+    for (_, cancel) in state.subscribed_pattern_cancels.drain() {
+        cancel.cancel();
+    }
+    // Remove all subscriptions from the shared registry.
+    state.pubsub.unsubscribe_all(state.connection_id);
+    // Clear connection-local subscription tracking.
+    state.subscribed_channels.clear();
+    state.subscribed_patterns.clear();
+    // Reset protocol version to RESP2.
+    state.protocol_version = 2;
+
+    RespValue::SimpleString(Bytes::from_static(b"RESET"))
 }
 
 fn handle_ping(args: &[Bytes]) -> RespValue {
@@ -334,9 +407,11 @@ mod tests {
 
     async fn dispatch_reply(cmd: &RedisCommand) -> RespValue {
         let mut state = ConnectionState::default_for_test();
-        match dispatch(cmd, &mut state).await {
+        let mut pubsub_rx = None;
+        match dispatch(cmd, &mut state, &mut pubsub_rx).await {
             CommandResponse::Reply(resp) => resp,
             CommandResponse::Close(resp) => resp,
+            CommandResponse::MultiReply(resps) => RespValue::Array(Some(resps)),
         }
     }
 
@@ -423,7 +498,8 @@ mod tests {
     async fn hello_defaults_to_resp2() {
         let cmd = make_cmd(b"HELLO", vec![]);
         let mut state = ConnectionState::default_for_test();
-        let resp = match dispatch(&cmd, &mut state).await {
+        let mut pubsub_rx = None;
+        let resp = match dispatch(&cmd, &mut state, &mut pubsub_rx).await {
             CommandResponse::Reply(r) => r,
             other => panic!("expected Reply, got {other:?}"),
         };
@@ -442,7 +518,8 @@ mod tests {
         let cmd = make_cmd(b"HELLO", vec![b"3"]);
         let mut state = ConnectionState::default_for_test();
         assert_eq!(state.protocol_version, 2);
-        match dispatch(&cmd, &mut state).await {
+        let mut pubsub_rx = None;
+        match dispatch(&cmd, &mut state, &mut pubsub_rx).await {
             CommandResponse::Reply(_) => {}
             other => panic!("expected Reply, got {other:?}"),
         }
@@ -453,7 +530,8 @@ mod tests {
     async fn hello_rejects_invalid_version() {
         let cmd = make_cmd(b"HELLO", vec![b"4"]);
         let mut state = ConnectionState::default_for_test();
-        match dispatch(&cmd, &mut state).await {
+        let mut pubsub_rx = None;
+        match dispatch(&cmd, &mut state, &mut pubsub_rx).await {
             CommandResponse::Reply(RespValue::Error(msg)) => {
                 assert!(msg.as_ref().starts_with(b"NOPROTO"));
             }
@@ -465,7 +543,8 @@ mod tests {
     async fn quit_returns_close() {
         let cmd = make_cmd(b"QUIT", vec![]);
         let mut state = ConnectionState::default_for_test();
-        match dispatch(&cmd, &mut state).await {
+        let mut pubsub_rx = None;
+        match dispatch(&cmd, &mut state, &mut pubsub_rx).await {
             CommandResponse::Close(RespValue::SimpleString(msg)) => {
                 assert_eq!(msg.as_ref(), b"OK");
             }

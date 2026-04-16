@@ -336,9 +336,17 @@ async fn exec_queued(tx_state: crate::server::connection::TransactionState, stat
 /// Commands that return `Close` (like QUIT) are treated as `Reply`
 /// inside a transaction — we don't close the connection mid-EXEC.
 async fn exec_single_command(cmd: &RedisCommand, state: &mut ConnectionState) -> RespValue {
-    match super::dispatch(cmd, state).await {
+    // EXEC runs queued commands in a shared transaction. Pub/sub commands
+    // don't make sense inside MULTI/EXEC (Redis rejects them at queue time),
+    // so we pass a dummy pubsub_rx that's never used.
+    let mut dummy_rx = None;
+    match super::dispatch(cmd, state, &mut dummy_rx).await {
         CommandResponse::Reply(resp) => resp,
         CommandResponse::Close(resp) => resp,
+        CommandResponse::MultiReply(resps) => {
+            // Shouldn't happen inside EXEC, but handle gracefully.
+            RespValue::Array(Some(resps))
+        }
     }
 }
 

@@ -39,6 +39,9 @@ futures = "0.3"
 # Random number generation (used by HRANDFIELD, SRANDMEMBER, etc.)
 rand = "0.8"
 
+# Concurrent hash map (used by pub/sub subscription registry)
+dashmap = "6"
+
 # Storage: FoundationDB client + serialization
 foundationdb = { version = "0.10", features = ["fdb-7_3"] }
 serde = { version = "1", features = ["derive"] }
