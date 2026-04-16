@@ -51,7 +51,7 @@ use foundationdb::options::TransactionOption;
 use tracing::{Instrument, info_span};
 
 use crate::error::CommandError;
-use crate::observability::metrics::FDB_TRANSACTION_DURATION_SECONDS;
+use crate::observability::metrics::{FDB_TRANSACTION_DURATION_SECONDS, TRANSACTION_OUTCOMES_TOTAL};
 use crate::protocol::types::{RedisCommand, RespValue};
 use crate::server::connection::ConnectionState;
 
@@ -74,6 +74,7 @@ pub fn handle_multi(args: &[Bytes], state: &mut ConnectionState) -> RespValue {
     let watched = std::mem::take(&mut state.watched_keys);
     state.transaction = Some(crate::server::connection::TransactionState::new(watched));
 
+    TRANSACTION_OUTCOMES_TOTAL.with_label_values(&["started"]).inc();
     RespValue::ok()
 }
 
@@ -94,6 +95,7 @@ pub fn handle_discard(args: &[Bytes], state: &mut ConnectionState) -> RespValue 
     state.transaction = None;
     state.watched_keys.clear();
 
+    TRANSACTION_OUTCOMES_TOTAL.with_label_values(&["discarded"]).inc();
     RespValue::ok()
 }
 
@@ -197,11 +199,13 @@ async fn handle_exec_inner(args: &[Bytes], state: &mut ConnectionState) -> RespV
 
     // If a syntax error was flagged during queuing, abort.
     if tx_state.error_flag {
+        TRANSACTION_OUTCOMES_TOTAL.with_label_values(&["exec_aborted"]).inc();
         return RespValue::err("EXECABORT Transaction discarded because of previous errors.");
     }
 
     // Empty queue — return empty array.
     if tx_state.queued.is_empty() {
+        TRANSACTION_OUTCOMES_TOTAL.with_label_values(&["committed"]).inc();
         return RespValue::Array(Some(vec![]));
     }
 
@@ -261,6 +265,7 @@ async fn exec_queued(tx_state: crate::server::connection::TransactionState, stat
                 FDB_TRANSACTION_DURATION_SECONDS
                     .with_label_values(&["EXEC", "conflict"])
                     .observe(elapsed);
+                TRANSACTION_OUTCOMES_TOTAL.with_label_values(&["watch_aborted"]).inc();
                 return RespValue::Array(None);
             }
         }
@@ -298,6 +303,7 @@ async fn exec_queued(tx_state: crate::server::connection::TransactionState, stat
                 FDB_TRANSACTION_DURATION_SECONDS
                     .with_label_values(&["EXEC", "committed"])
                     .observe(elapsed);
+                TRANSACTION_OUTCOMES_TOTAL.with_label_values(&["committed"]).inc();
                 RespValue::Array(Some(results))
             }
             Err(commit_err) => {
@@ -313,11 +319,13 @@ async fn exec_queued(tx_state: crate::server::connection::TransactionState, stat
                     FDB_TRANSACTION_DURATION_SECONDS
                         .with_label_values(&["EXEC", "conflict"])
                         .observe(elapsed);
+                    TRANSACTION_OUTCOMES_TOTAL.with_label_values(&["watch_aborted"]).inc();
                     RespValue::Array(None)
                 } else {
                     FDB_TRANSACTION_DURATION_SECONDS
                         .with_label_values(&["EXEC", "error"])
                         .observe(elapsed);
+                    TRANSACTION_OUTCOMES_TOTAL.with_label_values(&["error"]).inc();
                     RespValue::err(format!("ERR transaction commit failed: {commit_err}"))
                 }
             }
@@ -379,122 +387,8 @@ pub fn queue_command(cmd: RedisCommand, state: &mut ConnectionState) -> RespValu
 
 /// Check if a command name is one we support.
 ///
-/// This list MUST stay in sync with the dispatch match in `mod.rs`.
-/// Transaction-control commands (MULTI, EXEC, DISCARD, WATCH, UNWATCH)
-/// are intentionally excluded — they are intercepted in `dispatch()`
-/// before queuing and never reach this function.
+/// Driven by the central `commands::registry` table so it stays in
+/// sync with the dispatcher and the COMMAND introspection commands.
 fn is_known_command(name: &[u8]) -> bool {
-    matches!(
-        name,
-        b"PING"
-            | b"ECHO"
-            | b"HELLO"
-            | b"QUIT"
-            | b"COMMAND"
-            | b"CLIENT"
-            | b"GET"
-            | b"SET"
-            | b"DEL"
-            | b"EXISTS"
-            | b"SETNX"
-            | b"SETEX"
-            | b"PSETEX"
-            | b"GETDEL"
-            | b"MGET"
-            | b"MSET"
-            | b"INCR"
-            | b"DECR"
-            | b"INCRBY"
-            | b"DECRBY"
-            | b"INCRBYFLOAT"
-            | b"APPEND"
-            | b"STRLEN"
-            | b"GETRANGE"
-            | b"SETRANGE"
-            | b"TTL"
-            | b"PTTL"
-            | b"EXPIRETIME"
-            | b"PEXPIRETIME"
-            | b"EXPIRE"
-            | b"PEXPIRE"
-            | b"EXPIREAT"
-            | b"PEXPIREAT"
-            | b"PERSIST"
-            | b"TYPE"
-            | b"UNLINK"
-            | b"TOUCH"
-            | b"DBSIZE"
-            | b"RENAME"
-            | b"RENAMENX"
-            | b"SELECT"
-            | b"FLUSHDB"
-            | b"FLUSHALL"
-            | b"HSET"
-            | b"HGET"
-            | b"HDEL"
-            | b"HEXISTS"
-            | b"HLEN"
-            | b"HGETALL"
-            | b"HKEYS"
-            | b"HVALS"
-            | b"HMGET"
-            | b"HMSET"
-            | b"HINCRBY"
-            | b"HINCRBYFLOAT"
-            | b"HSETNX"
-            | b"HSTRLEN"
-            | b"HRANDFIELD"
-            | b"SADD"
-            | b"SREM"
-            | b"SISMEMBER"
-            | b"SMISMEMBER"
-            | b"SCARD"
-            | b"SMEMBERS"
-            | b"SPOP"
-            | b"SRANDMEMBER"
-            | b"SMOVE"
-            | b"SINTER"
-            | b"SUNION"
-            | b"SDIFF"
-            | b"SINTERSTORE"
-            | b"SUNIONSTORE"
-            | b"SDIFFSTORE"
-            | b"SINTERCARD"
-            | b"LPUSH"
-            | b"RPUSH"
-            | b"LPUSHX"
-            | b"RPUSHX"
-            | b"LPOP"
-            | b"RPOP"
-            | b"LLEN"
-            | b"LINDEX"
-            | b"LRANGE"
-            | b"LSET"
-            | b"LTRIM"
-            | b"LREM"
-            | b"LINSERT"
-            | b"LPOS"
-            | b"LMOVE"
-            | b"LMPOP"
-            | b"ZADD"
-            | b"ZCARD"
-            | b"ZSCORE"
-            | b"ZREM"
-            | b"ZRANK"
-            | b"ZREVRANK"
-            | b"ZINCRBY"
-            | b"ZRANGE"
-            | b"ZREVRANGE"
-            | b"ZCOUNT"
-            | b"ZLEXCOUNT"
-            | b"ZRANGEBYSCORE"
-            | b"ZRANGEBYLEX"
-            | b"ZREMRANGEBYRANK"
-            | b"ZREMRANGEBYSCORE"
-            | b"ZREMRANGEBYLEX"
-            | b"ZPOPMIN"
-            | b"ZPOPMAX"
-            | b"ZRANDMEMBER"
-            | b"ZMSCORE"
-    )
+    super::registry::is_known(name)
 }

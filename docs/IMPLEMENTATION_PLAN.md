@@ -17,7 +17,7 @@
 | M9.5: Cross-Key List Commands | **Complete** | 2 commands (LMOVE, LMPOP). Cross-key atomicity via single FDB transaction. 25 integration tests, 4 acceptance tests (property-based + model). |
 | M10: Transactions | **Complete** | 5 commands, two-phase WATCH conflict detection, shared-transaction MULTI/EXEC, no-rollback semantics. 24 integration tests. |
 | M11: Pub/Sub | **Complete** | SUBSCRIBE, UNSUBSCRIBE, PSUBSCRIBE, PUNSUBSCRIBE, PUBLISH, PUBSUB (CHANNELS/NUMSUB/NUMPAT). FDB-backed cross-instance delivery via versionstamp queue + FDB watches. Redis glob pattern matching. 22 integration tests, 6 acceptance tests. |
-| M12: Server Commands & Observability | Not started | |
+| M12: Server Commands & Observability | **Complete** | 22 admin commands (INFO, CONFIG, CLIENT, TIME, RANDOMKEY, KEYS, COMMAND, OBJECT, SLOWLOG, MEMORY, LATENCY, DEBUG, SHUTDOWN, BGSAVE, SAVE, BGREWRITEAOF, LASTSAVE, WAIT, ACL, AUTH). ClientRegistry (CLIENT LIST/KILL with cancel tokens), SlowLog ring buffer, CommandRegistry (table-driven COMMAND COUNT/DOCS/INFO/LIST), LiveConfig (CONFIG GET/SET), ServerState. Fixed PUBSUB metric cardinality vulnerability. Added uptime/network/transaction-outcome metrics. 34 integration tests, 5 new unit test modules. |
 | M13: Compatibility Testing | Not started | |
 
 ### What's been built (M0)
@@ -318,6 +318,76 @@ Shared helper: `parse_direction()` for LEFT|RIGHT argument parsing (used by both
 **Acceptance tests** (`tests/accept_pubsub.rs`) — 6 tests: 50-message ordered delivery, pattern matching correctness matrix (5 patterns × match/no-match channels), 5-subscriber fan-out, subscribe/unsubscribe lifecycle with no-replay verification, PUBSUB CHANNELS accuracy tracking, concurrent publisher ordering invariants.
 
 **`just test`**: 589 tests in ~3.8s. **`just accept`**: 82 acceptance tests.
+
+### What's been built (M12)
+
+**Observability hardening** (`src/observability/metrics.rs`):
+- **Fixed PUBSUB metric cardinality vulnerability**: `PUBSUB_MESSAGES_PUBLISHED_TOTAL` was labeled by `channel` — unbounded label DoS vector. Converted to a single unlabeled counter.
+- **New Prometheus metrics**: `kvdb_uptime_seconds` (refreshed on scrape), `kvdb_start_timestamp_seconds`, `kvdb_build_info` (version/arch/profile labels), `kvdb_network_bytes_read_total`, `kvdb_network_bytes_written_total`, `kvdb_commands_processed_total` (aggregate), `kvdb_transaction_outcomes_total` (started/committed/discarded/watch_aborted/exec_aborted/error).
+- **Deduplication**: `metric_label_for_command()` (~60 lines of match arms) and `is_known_command()` (~120 lines) replaced by single-source-of-truth lookups in `commands::registry`.
+
+**Infrastructure — 4 new modules**:
+- `server/clients.rs` — `ClientRegistry`: DashMap of `ClientHandle` per connection. Tracks id, addr, laddr, name, connected_at, last_active, db, protocol, last_cmd, MULTI queue depth, sub counts, WATCH count. Per-connection `CancellationToken` for `CLIENT KILL`. `KillFilter` with ID/ADDR/LADDR/SKIPME/MAXAGE/TYPE support. `ClientInfo` formatting for Redis-compatible `CLIENT LIST` output.
+- `server/slowlog.rs` — Bounded ring buffer (`VecDeque` behind `Mutex`). Configurable threshold (microseconds) and max entries. Argument truncation (128 bytes per arg, 32 args max) to bound memory. Automatically recorded by `dispatch_one()` after every command.
+- `server/server_state.rs` — `ServerState` bundles registry, slow log, `LiveConfig`, shutdown sender, bind address, FDB cluster file path. One `Arc` shared with every connection. `LiveConfig` supports 13 parameters (maxclients, timeout, tcp-keepalive, databases, maxmemory, maxmemory-policy, requirepass, dir, appendonly, save, loglevel, slowlog-log-slower-than, slowlog-max-len) with atomic reads and `CONFIG GET/SET` support.
+- `commands/registry.rs` — Static `COMMAND_TABLE` of 130+ `CommandSpec` entries. `const fn` constructor for zero-init cost. Powers `COMMAND COUNT/DOCS/INFO/LIST/GETKEYS`, `metric_label()`, and `is_known()`. Enforced no-duplicate-names and all-uppercase invariants via unit tests.
+
+**Server admin commands** (`src/commands/server.rs`, ~1500 lines) — 22 commands:
+- **INFO** [section ...]: server (with kvdb_version, storage_engine:foundationdb, fdb_cluster_file), clients, memory, persistence, stats, replication, cpu, commandstats (from Prometheus histogram families), keyspace (live FDB scan per cached namespace). Supports `all`, `everything`, `default` meta-sections.
+- **CONFIG** GET (glob pattern matching), SET (validates and stores atomically), RESETSTAT, REWRITE (returns "no config file" error), HELP.
+- **CLIENT** ID, GETNAME, SETNAME (validates no spaces/newlines), SETINFO (LIB-NAME/LIB-VER), INFO, LIST (TYPE normal|pubsub, ID id1 id2), KILL (old form `ip:port`, new form with ID/ADDR/LADDR/SKIPME/MAXAGE/TYPE), NO-EVICT ON|OFF, NO-TOUCH ON|OFF, REPLY ON|OFF|SKIP, PAUSE/UNPAUSE (no-op), GETREDIR, HELP.
+- **COMMAND** (bare), COUNT, LIST, INFO [name ...], DOCS [name ...], GETKEYS, HELP.
+- **TIME**: 2-element array [seconds, microseconds].
+- **RANDOMKEY**: Uniform random non-expired key via FDB meta range scan.
+- **KEYS** pattern: Redis glob matching (reuses `pubsub::pattern::GlobMatcher`) over meta range scan.
+- **OBJECT** ENCODING (embstr/raw/listpack/hashtable/skiplist/quicklist based on type+cardinality), IDLETIME (from ObjectMeta.last_accessed_ms), REFCOUNT (always 1), FREQ (always 0), HELP.
+- **SLOWLOG** GET [count], LEN, RESET, HELP.
+- **MEMORY** USAGE key (meta overhead + payload estimate), STATS (network bytes, uptime, eviction policy), DOCTOR, PURGE (no-op), MALLOC-STATS, HELP.
+- **LATENCY** RESET, LATEST, HISTORY, GRAPH, DOCTOR (all stubs directing operators to Prometheus), HELP.
+- **DEBUG** SLEEP (capped at 60s), OBJECT (serializedlength, encoding, type), SET-ACTIVE-EXPIRE (no-op), JMAP (no-op), HELP.
+- **SHUTDOWN** [NOSAVE|SAVE|NOW|FORCE|ABORT]: Fires broadcast shutdown channel. ABORT returns "No shutdown in progress".
+- **BGSAVE**: Returns "Background saving started" (FDB owns durability).
+- **SAVE**: Returns OK.
+- **BGREWRITEAOF**: Returns "Background append only file rewriting started".
+- **LASTSAVE**: Returns server start UNIX timestamp.
+- **WAIT** numreplicas timeout: Returns 0 immediately (FDB owns replication).
+- **ACL** WHOAMI ("default"), LIST (single default user), USERS, CAT (category list), GETUSER (full flags/permissions for "default"), HELP.
+- **AUTH** [username] password: Validates against `CONFIG SET requirepass`. Errors if no password is set.
+
+**Connection lifecycle changes** (`src/server/connection.rs`):
+- `select!` loop extended with `biased` `kill.cancelled()` branch for `CLIENT KILL` — takes priority over data reads.
+- `CLIENT REPLY OFF/SKIP` response suppression via `dispatch_one()` post-processing.
+- Per-command `update_client_handle_pre/post()` mirrors db, protocol, last_cmd, sub counts, MULTI queue depth, WATCH count into the shared `ClientHandle` for `CLIENT LIST/INFO` visibility.
+- Network byte counters (`NETWORK_BYTES_READ_TOTAL/WRITTEN_TOTAL`) incremented on every read/write.
+- SlowLog recording via `record_slowlog()` after every command dispatch.
+
+**Listener changes** (`src/server/listener.rs`):
+- `run()` now takes `broadcast::Sender<()>` instead of `Receiver` (subscribes internally). This allows `SHUTDOWN` to fire the same channel.
+- Builds `ServerState` and `ClientRegistry` as shared `Arc`s threaded to every connection.
+
+**Integration tests** (`tests/server_admin.rs`) — 34 tests:
+- INFO: server section fields (redis_version, kvdb_version, tcp_port, uptime, storage_engine), clients section (connected_clients), stats section (total_commands_processed), keyspace after SET, default contains multiple sections.
+- DBSIZE: reflects key count after SET.
+- TIME: 2-element array, sane range (year 2020+, microseconds < 1M).
+- RANDOMKEY: nil on empty db, returns existing key.
+- KEYS: glob matching (h*llo), star returns all.
+- CONFIG: GET maxclients, SET+GET roundtrip, GET wildcard returns many params.
+- CLIENT: ID > 0, SETNAME/GETNAME roundtrip, LIST contains named connection, INFO contains connection fields.
+- COMMAND: COUNT > 100, LIST includes set/get.
+- OBJECT: ENCODING string (embstr/raw), REFCOUNT always 1, nonexistent key errors.
+- SLOWLOG: LEN >= 0, RESET clears.
+- MEMORY: USAGE returns positive estimate.
+- LATENCY: LATEST returns empty.
+- DEBUG: SLEEP 0.1 takes ~100ms.
+- BGSAVE: returns "Background saving" message.
+- SAVE: returns OK.
+- LASTSAVE: returns recent UNIX timestamp.
+- WAIT: returns 0.
+- ACL: WHOAMI returns "default", LIST returns single default user.
+
+**Unit tests** — 5 modules with 15+ tests: `clients.rs` (register/get/deregister, snapshot sorted by id, kill_id cancels token, kill_filter by addr and skipme, parse_kill old/new form, format_line essentials), `slowlog.rs` (below threshold, at threshold, negative disables, ring overwrites oldest, truncates oversized args, reset clears but id continues, extra args marker), `registry.rs` (case-insensitive lookup, metric_label unknown fallback, count matches, no duplicate names, names are uppercase).
+
+**`just test`**: 635 tests in ~3.0s. **`just accept`**: 82 acceptance tests.
 
 ---
 
@@ -1238,30 +1308,14 @@ Each data structure milestone follows the same two-tier test pattern:
 4. **AUTH**: Basic AUTH command with configurable password
 5. **Graceful shutdown**: SIGTERM/SIGINT handler, drain connections, flush workers
 
-6. **Acceptance tests** (`tests/integration/server.rs` — extends the M2 tests):
-   ```rust
-   #[tokio::test]
-   async fn info_returns_server_section() {
-       let ctx = TestContext::new().await;
-       let mut con = ctx.conn().await;
-       let info: String = redis::cmd("INFO").arg("server")
-           .query_async(&mut con).await.unwrap();
-       assert!(info.contains("redis_version"));
-       assert!(info.contains("tcp_port"));
-   }
-
-   #[tokio::test]
-   async fn dbsize_reflects_key_count() {
-       let ctx = TestContext::new().await;
-       let mut con = ctx.conn().await;
-       let _: () = con.set("a", "1").await.unwrap();
-       let _: () = con.set("b", "2").await.unwrap();
-       let size: i64 = redis::cmd("DBSIZE").query_async(&mut con).await.unwrap();
-       assert_eq!(size, 2);
-   }
-   ```
-
 **Exit criteria**: INFO works. Metrics exposed. AUTH works. Graceful shutdown works. redis-benchmark runs successfully. `just test` under 2 seconds. `just accept` under 15 seconds.
+
+### What was NOT implemented (deferred)
+
+1. **TLS** (`rustls` + `tokio-rustls`): Requires cert/key path config params, a `tokio-rustls` acceptor wrapping the TCP listener, and optional client cert validation. Self-contained work that can be a follow-up without blocking any other milestone. Does not affect the Redis wire protocol.
+2. **AUTH gating middleware**: The `AUTH` command exists and validates passwords against `CONFIG SET requirepass`, but there is no pre-dispatch middleware that blocks unauthenticated commands. The clean path is a boolean flag on `ConnectionState` (`authenticated: bool`) checked at the top of `dispatch()`, with an exception list for `AUTH`, `HELLO`, `QUIT`, and `RESET`. Low effort but intentionally deferred because it changes the connection lifecycle and needs its own test coverage.
+3. **Connection draining on SHUTDOWN**: `SHUTDOWN` fires the broadcast channel, causing the listener to stop accepting. In-flight connections finish their current command naturally but are not explicitly drained (waited on) before the process exits. A more graceful path would track all connection `JoinHandle`s and `join` them with a timeout before returning from `listener::run()`.
+4. **SCAN / HSCAN / SSCAN / ZSCAN**: Cursor-based iteration is explicitly Phase 2 per the plan.
 
 ---
 

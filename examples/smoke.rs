@@ -2402,6 +2402,278 @@ async fn run_validate(addr: &str) -> bool {
     let result: redis::RedisResult<String> = redis::cmd("PING").query_async(&mut con).await;
     t.check_eq("server alive after errors", result, "PONG".to_string());
 
+    // -- Server Admin Commands (M12) ----------------------------------------
+    println!("Server Admin Commands");
+
+    // Seed keys for the admin commands to inspect — earlier sections may
+    // have FLUSHDB/FLUSHALL'd them away.
+    let _: redis::RedisResult<String> = redis::cmd("SET")
+        .arg("greeting")
+        .arg("hello world")
+        .query_async(&mut con)
+        .await;
+    let _: redis::RedisResult<String> = redis::cmd("SET").arg("counter").arg("42").query_async(&mut con).await;
+
+    // INFO
+    let result: redis::RedisResult<String> = redis::cmd("INFO").query_async(&mut con).await;
+    match &result {
+        Ok(info) => {
+            if info.contains("# Server") && info.contains("redis_version") {
+                t.pass("INFO returns server section");
+            } else {
+                t.fail("INFO returns server section", "missing expected fields");
+            }
+        }
+        Err(e) => t.fail("INFO returns server section", &format!("error: {e}")),
+    }
+
+    let result: redis::RedisResult<String> = redis::cmd("INFO").arg("server").query_async(&mut con).await;
+    match &result {
+        Ok(info) => {
+            if info.contains("kvdb_version") && info.contains("storage_engine:foundationdb") {
+                t.pass("INFO server has kvdb fields");
+            } else {
+                t.fail("INFO server has kvdb fields", "missing kvdb_version or storage_engine");
+            }
+        }
+        Err(e) => t.fail("INFO server has kvdb fields", &format!("error: {e}")),
+    }
+
+    // TIME
+    let result: redis::RedisResult<Vec<String>> = redis::cmd("TIME").query_async(&mut con).await;
+    match result {
+        Ok(ref v) if v.len() == 2 => {
+            let secs: u64 = v[0].parse().unwrap_or(0);
+            if secs > 1_577_000_000 {
+                t.pass("TIME returns sane timestamp");
+            } else {
+                t.fail("TIME returns sane timestamp", &format!("seconds={secs}"));
+            }
+        }
+        Ok(v) => t.fail("TIME returns 2 elements", &format!("got {} elements", v.len())),
+        Err(e) => t.fail("TIME returns sane timestamp", &format!("error: {e}")),
+    }
+
+    // COMMAND COUNT
+    let result: redis::RedisResult<i64> = redis::cmd("COMMAND").arg("COUNT").query_async(&mut con).await;
+    match result {
+        Ok(n) if n > 100 => t.pass("COMMAND COUNT > 100"),
+        Ok(n) => t.fail("COMMAND COUNT > 100", &format!("got {n}")),
+        Err(e) => t.fail("COMMAND COUNT > 100", &format!("error: {e}")),
+    }
+
+    // COMMAND LIST
+    let result: redis::RedisResult<Vec<String>> = redis::cmd("COMMAND").arg("LIST").query_async(&mut con).await;
+    match result {
+        Ok(ref v) if v.contains(&"set".to_string()) && v.contains(&"get".to_string()) => {
+            t.pass("COMMAND LIST includes set and get");
+        }
+        Ok(_) => t.fail("COMMAND LIST includes set and get", "missing set or get"),
+        Err(e) => t.fail("COMMAND LIST includes set and get", &format!("error: {e}")),
+    }
+
+    // CONFIG GET/SET
+    let result: redis::RedisResult<Vec<String>> = redis::cmd("CONFIG")
+        .arg("GET")
+        .arg("maxclients")
+        .query_async(&mut con)
+        .await;
+    match result {
+        Ok(ref v) if v.len() == 2 && v[0] == "maxclients" => t.pass("CONFIG GET maxclients"),
+        Ok(v) => t.fail("CONFIG GET maxclients", &format!("unexpected: {v:?}")),
+        Err(e) => t.fail("CONFIG GET maxclients", &format!("error: {e}")),
+    }
+
+    let result: redis::RedisResult<String> = redis::cmd("CONFIG")
+        .arg("SET")
+        .arg("timeout")
+        .arg("42")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("CONFIG SET timeout 42", result, "OK".to_string());
+
+    let result: redis::RedisResult<Vec<String>> = redis::cmd("CONFIG")
+        .arg("GET")
+        .arg("timeout")
+        .query_async(&mut con)
+        .await;
+    match result {
+        Ok(ref v) if v.len() == 2 && v[1] == "42" => t.pass("CONFIG SET/GET roundtrip"),
+        Ok(v) => t.fail("CONFIG SET/GET roundtrip", &format!("got: {v:?}")),
+        Err(e) => t.fail("CONFIG SET/GET roundtrip", &format!("error: {e}")),
+    }
+
+    // CONFIG GET *
+    let result: redis::RedisResult<Vec<String>> = redis::cmd("CONFIG").arg("GET").arg("*").query_async(&mut con).await;
+    match result {
+        Ok(ref v) if v.len() >= 10 => t.pass("CONFIG GET * returns many params"),
+        Ok(v) => t.fail("CONFIG GET * returns many params", &format!("only {} items", v.len())),
+        Err(e) => t.fail("CONFIG GET * returns many params", &format!("error: {e}")),
+    }
+
+    // CLIENT ID
+    let result: redis::RedisResult<i64> = redis::cmd("CLIENT").arg("ID").query_async(&mut con).await;
+    match result {
+        Ok(id) if id > 0 => t.pass("CLIENT ID > 0"),
+        Ok(id) => t.fail("CLIENT ID > 0", &format!("got {id}")),
+        Err(e) => t.fail("CLIENT ID > 0", &format!("error: {e}")),
+    }
+
+    // CLIENT SETNAME / GETNAME
+    let result: redis::RedisResult<String> = redis::cmd("CLIENT")
+        .arg("SETNAME")
+        .arg("smoke-admin")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("CLIENT SETNAME smoke-admin", result, "OK".to_string());
+
+    let result: redis::RedisResult<String> = redis::cmd("CLIENT").arg("GETNAME").query_async(&mut con).await;
+    t.check_eq("CLIENT GETNAME returns smoke-admin", result, "smoke-admin".to_string());
+
+    // CLIENT LIST
+    let result: redis::RedisResult<String> = redis::cmd("CLIENT").arg("LIST").query_async(&mut con).await;
+    match result {
+        Ok(ref s) if s.contains("name=smoke-admin") => t.pass("CLIENT LIST contains our name"),
+        Ok(s) => t.fail("CLIENT LIST contains our name", &format!("got: {s}")),
+        Err(e) => t.fail("CLIENT LIST contains our name", &format!("error: {e}")),
+    }
+
+    // CLIENT INFO
+    let result: redis::RedisResult<String> = redis::cmd("CLIENT").arg("INFO").query_async(&mut con).await;
+    match result {
+        Ok(ref s) if s.contains("id=") && s.contains("db=") => t.pass("CLIENT INFO has id and db"),
+        Ok(s) => t.fail("CLIENT INFO has id and db", &format!("got: {s}")),
+        Err(e) => t.fail("CLIENT INFO has id and db", &format!("error: {e}")),
+    }
+
+    // KEYS pattern
+    // We still have "greeting" and "counter" from string tests above.
+    let result: redis::RedisResult<Vec<String>> = redis::cmd("KEYS").arg("gree*").query_async(&mut con).await;
+    match result {
+        Ok(ref v) if v.contains(&"greeting".to_string()) => t.pass("KEYS gree* matches greeting"),
+        Ok(v) => t.fail("KEYS gree* matches greeting", &format!("got: {v:?}")),
+        Err(e) => t.fail("KEYS gree* matches greeting", &format!("error: {e}")),
+    }
+
+    // RANDOMKEY
+    let result: redis::RedisResult<String> = redis::cmd("RANDOMKEY").query_async(&mut con).await;
+    match result {
+        Ok(ref key) if !key.is_empty() => t.pass("RANDOMKEY returns a key"),
+        Ok(_) => t.fail("RANDOMKEY returns a key", "empty string"),
+        Err(e) => t.fail("RANDOMKEY returns a key", &format!("error: {e}")),
+    }
+
+    // OBJECT ENCODING / REFCOUNT
+    let result: redis::RedisResult<String> = redis::cmd("OBJECT")
+        .arg("ENCODING")
+        .arg("greeting")
+        .query_async(&mut con)
+        .await;
+    match result {
+        Ok(ref enc) if enc == "embstr" || enc == "raw" => t.pass("OBJECT ENCODING greeting"),
+        Ok(enc) => t.fail("OBJECT ENCODING greeting", &format!("got: {enc}")),
+        Err(e) => t.fail("OBJECT ENCODING greeting", &format!("error: {e}")),
+    }
+
+    let result: redis::RedisResult<i64> = redis::cmd("OBJECT")
+        .arg("REFCOUNT")
+        .arg("greeting")
+        .query_async(&mut con)
+        .await;
+    t.check_eq("OBJECT REFCOUNT greeting", result, 1);
+
+    let result: redis::RedisResult<String> = redis::cmd("OBJECT")
+        .arg("ENCODING")
+        .arg("nonexistent_key_xyz")
+        .query_async(&mut con)
+        .await;
+    t.check_err("OBJECT ENCODING nonexistent errors", result);
+
+    // SLOWLOG
+    let result: redis::RedisResult<i64> = redis::cmd("SLOWLOG").arg("LEN").query_async(&mut con).await;
+    match result {
+        Ok(n) if n >= 0 => t.pass("SLOWLOG LEN >= 0"),
+        Ok(n) => t.fail("SLOWLOG LEN >= 0", &format!("got {n}")),
+        Err(e) => t.fail("SLOWLOG LEN >= 0", &format!("error: {e}")),
+    }
+
+    let result: redis::RedisResult<String> = redis::cmd("SLOWLOG").arg("RESET").query_async(&mut con).await;
+    t.check_eq("SLOWLOG RESET", result, "OK".to_string());
+
+    // MEMORY USAGE
+    let result: redis::RedisResult<i64> = redis::cmd("MEMORY")
+        .arg("USAGE")
+        .arg("greeting")
+        .query_async(&mut con)
+        .await;
+    match result {
+        Ok(bytes) if bytes > 0 => t.pass("MEMORY USAGE > 0"),
+        Ok(bytes) => t.fail("MEMORY USAGE > 0", &format!("got {bytes}")),
+        Err(e) => t.fail("MEMORY USAGE > 0", &format!("error: {e}")),
+    }
+
+    // LATENCY
+    let result: redis::RedisResult<Vec<String>> = redis::cmd("LATENCY").arg("LATEST").query_async(&mut con).await;
+    match result {
+        Ok(ref v) if v.is_empty() => t.pass("LATENCY LATEST returns empty"),
+        Ok(v) => t.fail("LATENCY LATEST returns empty", &format!("got {v:?}")),
+        Err(e) => t.fail("LATENCY LATEST returns empty", &format!("error: {e}")),
+    }
+
+    // ACL WHOAMI
+    let result: redis::RedisResult<String> = redis::cmd("ACL").arg("WHOAMI").query_async(&mut con).await;
+    t.check_eq("ACL WHOAMI returns default", result, "default".to_string());
+
+    // BGSAVE / SAVE / LASTSAVE / WAIT
+    let result: redis::RedisResult<String> = redis::cmd("BGSAVE").query_async(&mut con).await;
+    match result {
+        Ok(ref s) if s.contains("Background saving") => t.pass("BGSAVE returns background saving"),
+        Ok(s) => t.fail("BGSAVE returns background saving", &format!("got: {s}")),
+        Err(e) => t.fail("BGSAVE returns background saving", &format!("error: {e}")),
+    }
+
+    let result: redis::RedisResult<String> = redis::cmd("SAVE").query_async(&mut con).await;
+    t.check_eq("SAVE returns OK", result, "OK".to_string());
+
+    let result: redis::RedisResult<i64> = redis::cmd("LASTSAVE").query_async(&mut con).await;
+    match result {
+        Ok(ts) if ts > 1_577_000_000 => t.pass("LASTSAVE recent timestamp"),
+        Ok(ts) => t.fail("LASTSAVE recent timestamp", &format!("got {ts}")),
+        Err(e) => t.fail("LASTSAVE recent timestamp", &format!("error: {e}")),
+    }
+
+    let result: redis::RedisResult<i64> = redis::cmd("WAIT").arg("1").arg("0").query_async(&mut con).await;
+    t.check_eq("WAIT returns 0", result, 0);
+
+    // DEBUG SLEEP (short)
+    let start = Instant::now();
+    let result: redis::RedisResult<String> = redis::cmd("DEBUG").arg("SLEEP").arg("0.05").query_async(&mut con).await;
+    let elapsed_ms = start.elapsed().as_millis();
+    match result {
+        Ok(_) if elapsed_ms >= 30 => t.pass("DEBUG SLEEP 50ms works"),
+        Ok(_) => t.fail("DEBUG SLEEP 50ms works", &format!("only {elapsed_ms}ms")),
+        Err(e) => t.fail("DEBUG SLEEP 50ms works", &format!("error: {e}")),
+    }
+
+    // Server admin error handling
+    let result: redis::RedisResult<String> = redis::cmd("CONFIG").query_async(&mut con).await;
+    t.check_err("CONFIG no subcommand errors", result);
+
+    let result: redis::RedisResult<String> = redis::cmd("CONFIG")
+        .arg("SET")
+        .arg("databases")
+        .arg("32")
+        .query_async(&mut con)
+        .await;
+    t.check_err("CONFIG SET databases (immutable) errors", result);
+
+    let result: redis::RedisResult<String> = redis::cmd("OBJECT").arg("INVALID_SUB").query_async(&mut con).await;
+    t.check_err("OBJECT invalid subcommand errors", result);
+
+    // Post-admin liveness check
+    let result: redis::RedisResult<String> = redis::cmd("PING").query_async(&mut con).await;
+    t.check_eq("server alive after admin commands", result, "PONG".to_string());
+
     // -- QUIT (open a separate connection for this) -------------------------
     println!("QUIT");
 

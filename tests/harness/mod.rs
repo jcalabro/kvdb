@@ -73,11 +73,12 @@ impl TestContext {
         config.db = Some(db.clone());
         config.root_prefix = Some(root_prefix.clone());
 
-        let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+        let (shutdown_tx, _initial_rx) = broadcast::channel::<()>(1);
+        let server_shutdown_tx = shutdown_tx.clone();
 
         let server_config = config.clone();
         let server_handle = tokio::spawn(async move {
-            if let Err(e) = kvdb::server::listener::run(server_config, shutdown_rx, Some(listener)).await {
+            if let Err(e) = kvdb::server::listener::run(server_config, server_shutdown_tx, Some(listener)).await {
                 // Only log if it's not a shutdown-related error.
                 eprintln!("test server error: {e}");
             }

@@ -13,7 +13,10 @@ use tracing::{error, info};
 use crate::config::ServerConfig;
 use crate::observability::metrics;
 use crate::pubsub::{self, PubSubDirectories, PubSubManager, SharedPubSubManager};
+use crate::server::clients::{ClientRegistry, SharedClientRegistry};
 use crate::server::connection;
+use crate::server::server_state::{ServerState, SharedServerState};
+use crate::server::slowlog::SlowLog;
 use crate::storage::{Database, Directories, NamespaceCache};
 use crate::ttl;
 
@@ -27,9 +30,14 @@ use crate::ttl;
 /// tests (bind port 0 → drop → rebind).
 pub async fn run(
     config: ServerConfig,
-    shutdown: tokio::sync::broadcast::Receiver<()>,
+    shutdown_tx: tokio::sync::broadcast::Sender<()>,
     pre_bound: Option<TcpListener>,
 ) -> anyhow::Result<()> {
+    // Subscribe before doing anything that could call .send() on the
+    // sender (e.g., the SHUTDOWN command via ServerState). This ensures
+    // we never miss the signal due to a TOCTOU between subscribe() and
+    // the first send().
+    let mut shutdown = shutdown_tx.subscribe();
     // Initialize FDB: use injected handles (tests) or create fresh ones.
     let db = match config.db {
         Some(ref db) => db.clone(),
@@ -73,11 +81,25 @@ pub async fn run(
         Some(l) => l,
         None => TcpListener::bind(config.bind_addr).await?,
     };
+    // Capture the actual bound address (matters when caller passes port 0).
+    let local_addr = listener.local_addr().unwrap_or(config.bind_addr);
     let semaphore = Arc::new(Semaphore::new(config.max_connections));
 
-    info!(addr = %config.bind_addr, "listening for connections");
+    let client_registry: SharedClientRegistry = Arc::new(ClientRegistry::new());
+    let slowlog = Arc::new(SlowLog::new());
 
-    let mut shutdown = shutdown;
+    // Build process-wide ServerState. Sharing one Arc with every
+    // connection means CLIENT LIST/KILL, CONFIG, SLOWLOG, and SHUTDOWN
+    // all see the same state without per-call allocation.
+    let server_state: SharedServerState = Arc::new(ServerState::new(
+        &config,
+        client_registry.clone(),
+        slowlog.clone(),
+        local_addr,
+        shutdown_tx.clone(),
+    ));
+
+    info!(addr = %config.bind_addr, "listening for connections");
 
     loop {
         tokio::select! {
@@ -102,11 +124,16 @@ pub async fn run(
                 let conn_dirs = dirs.clone();
                 let conn_ns_cache = ns_cache.clone();
                 let conn_pubsub = pubsub_manager.clone();
-                let conn_id = pubsub_manager.next_connection_id();
+                let conn_clients = client_registry.clone();
+                let conn_server = server_state.clone();
+                // Connection ids come from the client registry (single source
+                // of truth) rather than the pub/sub manager, so CLIENT KILL
+                // and PUBSUB observe the same id space.
+                let conn_id = client_registry.next_id();
                 tokio::spawn(async move {
                     if let Err(e) = connection::handle(
-                        socket, addr, conn_db, conn_dirs, conn_ns_cache,
-                        conn_pubsub, conn_id,
+                        socket, addr, local_addr, conn_db, conn_dirs, conn_ns_cache,
+                        conn_pubsub, conn_clients, conn_server, conn_id,
                     ).await {
                         error!(%addr, error = %e, "connection error");
                     }

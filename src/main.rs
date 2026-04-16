@@ -24,16 +24,20 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Create a broadcast channel for coordinating graceful shutdown.
-    let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
+    // The Sender goes both to the listener (which subscribes internally
+    // and exposes it via ServerState so the SHUTDOWN command can fire it)
+    // and to the ctrl-c watcher.
+    let (shutdown_tx, _initial_rx) = tokio::sync::broadcast::channel::<()>(1);
+    let ctrl_c_tx = shutdown_tx.clone();
 
     // Spawn a task that listens for ctrl-c.
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.expect("failed to listen for ctrl-c");
         info!("received ctrl-c, initiating shutdown");
-        let _ = shutdown_tx.send(());
+        let _ = ctrl_c_tx.send(());
     });
 
-    kvdb::server::listener::run(config, shutdown_rx, None).await?;
+    kvdb::server::listener::run(config, shutdown_tx, None).await?;
 
     info!("kvdb shut down cleanly");
     Ok(())

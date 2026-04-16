@@ -5,5 +5,8 @@
 //! maintains its own read/write buffers, protocol version, and selected
 //! database namespace.
 
+pub mod clients;
 pub mod connection;
 pub mod listener;
+pub mod server_state;
+pub mod slowlog;

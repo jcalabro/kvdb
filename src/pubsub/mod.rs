@@ -68,7 +68,44 @@ pub struct PubSubDirectories {
 
 impl PubSubDirectories {
     /// Open (or create) the pub/sub directories under `root_prefix`.
+    /// Maximum number of retries for directory creation (matches
+    /// `Directories::DIR_OPEN_MAX_RETRIES`).
+    const DIR_OPEN_MAX_RETRIES: u32 = 10;
+
+    /// Open (or create) the pub/sub FDB directory subspaces with
+    /// automatic retry on transient FDB conflicts.
+    ///
+    /// Under heavy parallelism (e.g. nextest running hundreds of tests)
+    /// the FDB directory layer transaction can conflict. Without retry
+    /// the server crashes on startup — a silent, non-deterministic
+    /// failure that looks like a flaky test.
     pub async fn open(db: &Database, root_prefix: &str) -> Result<Self, StorageError> {
+        let mut last_err = None;
+
+        for attempt in 0..Self::DIR_OPEN_MAX_RETRIES {
+            match Self::try_open(db, root_prefix).await {
+                Ok(dirs) => return Ok(dirs),
+                Err(e) => {
+                    tracing::warn!(attempt, error = %e, "pubsub directory open conflict, retrying");
+                    last_err = Some(e);
+                    // Jittered backoff matching Directories::open pattern.
+                    let base_ms = 30
+                        + (std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .subsec_nanos()
+                            % 50) as u64;
+                    let delay_ms = base_ms + (attempt as u64) * 20;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                }
+            }
+        }
+
+        Err(last_err.unwrap())
+    }
+
+    /// Single attempt to open pub/sub directories.
+    async fn try_open(db: &Database, root_prefix: &str) -> Result<Self, StorageError> {
         let trx = db.inner().create_trx().map_err(StorageError::Fdb)?;
         let dir_layer = DirectoryLayer::default();
 
@@ -233,16 +270,9 @@ impl PubSubManager {
 
         trx.commit().await.map_err(|e| StorageError::Fdb(e.into()))?;
 
-        // Track publish metrics. Use a truncated channel name to avoid
-        // high-cardinality label explosion for channels with unique names.
-        let channel_label = if channel.len() <= 64 {
-            String::from_utf8_lossy(channel).into_owned()
-        } else {
-            format!("{}...", &String::from_utf8_lossy(&channel[..61]))
-        };
-        metrics::PUBSUB_MESSAGES_PUBLISHED_TOTAL
-            .with_label_values(&[&channel_label])
-            .inc();
+        // Track publish metrics. The counter is intentionally unlabeled
+        // (channel name would be unbounded cardinality — DoS vector).
+        metrics::PUBSUB_MESSAGES_PUBLISHED_TOTAL.inc();
 
         // Count and deliver to local subscribers.
         let mut count = 0i64;

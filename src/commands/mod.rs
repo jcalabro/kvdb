@@ -9,6 +9,8 @@ pub mod hashes;
 pub mod keys;
 pub mod lists;
 pub mod pubsub;
+pub mod registry;
+pub mod server;
 pub mod sets;
 pub mod sorted_sets;
 pub mod strings;
@@ -113,8 +115,26 @@ pub async fn dispatch(
         b"ECHO" => CommandResponse::Reply(handle_echo(&cmd.args)),
         b"HELLO" => CommandResponse::Reply(handle_hello(&cmd.args, state)),
         b"QUIT" => CommandResponse::Close(RespValue::ok()),
-        b"COMMAND" => CommandResponse::Reply(handle_command(&cmd.args)),
-        b"CLIENT" => CommandResponse::Reply(handle_client(&cmd.args)),
+        b"COMMAND" => CommandResponse::Reply(server::handle_command(&cmd.args).await),
+        b"CLIENT" => CommandResponse::Reply(server::handle_client(&cmd.args, state).await),
+        b"INFO" => CommandResponse::Reply(server::handle_info(&cmd.args, state).await),
+        b"CONFIG" => CommandResponse::Reply(server::handle_config(&cmd.args, state).await),
+        b"TIME" => CommandResponse::Reply(server::handle_time(&cmd.args).await),
+        b"RANDOMKEY" => CommandResponse::Reply(server::handle_randomkey(&cmd.args, state).await),
+        b"KEYS" => CommandResponse::Reply(server::handle_keys(&cmd.args, state).await),
+        b"OBJECT" => CommandResponse::Reply(server::handle_object(&cmd.args, state).await),
+        b"SLOWLOG" => CommandResponse::Reply(server::handle_slowlog(&cmd.args, state).await),
+        b"MEMORY" => CommandResponse::Reply(server::handle_memory(&cmd.args, state).await),
+        b"LATENCY" => CommandResponse::Reply(server::handle_latency(&cmd.args).await),
+        b"DEBUG" => CommandResponse::Reply(server::handle_debug(&cmd.args, state).await),
+        b"SHUTDOWN" => CommandResponse::Reply(server::handle_shutdown(&cmd.args, state).await),
+        b"BGSAVE" => CommandResponse::Reply(server::handle_bgsave(&cmd.args).await),
+        b"SAVE" => CommandResponse::Reply(server::handle_save(&cmd.args).await),
+        b"BGREWRITEAOF" => CommandResponse::Reply(server::handle_bgrewriteaof(&cmd.args).await),
+        b"LASTSAVE" => CommandResponse::Reply(server::handle_lastsave(&cmd.args, state).await),
+        b"WAIT" => CommandResponse::Reply(server::handle_wait(&cmd.args).await),
+        b"ACL" => CommandResponse::Reply(server::handle_acl(&cmd.args).await),
+        b"AUTH" => CommandResponse::Reply(server::handle_auth(&cmd.args, state).await),
         b"GET" => CommandResponse::Reply(strings::handle_get(&cmd.args, state).await),
         b"SET" => CommandResponse::Reply(strings::handle_set(&cmd.args, state).await),
         b"DEL" => CommandResponse::Reply(strings::handle_del(&cmd.args, state).await),
@@ -352,47 +372,9 @@ fn handle_hello(args: &[Bytes], state: &mut ConnectionState) -> RespValue {
     ])
 }
 
-/// COMMAND [subcommand]
-///
-/// Minimal stubs for client library handshake.
-fn handle_command(args: &[Bytes]) -> RespValue {
-    if args.is_empty() {
-        return RespValue::Array(Some(vec![]));
-    }
-
-    let subcmd = args[0].to_ascii_uppercase();
-    match subcmd.as_slice() {
-        b"COUNT" => RespValue::Integer(0),
-        b"DOCS" => RespValue::Map(vec![]),
-        b"LIST" => RespValue::Array(Some(vec![])),
-        b"INFO" => RespValue::Array(Some(vec![])),
-        _ => RespValue::err(format!(
-            "ERR unknown subcommand or wrong number of arguments for 'COMMAND|{}' command",
-            sanitize_for_error(&subcmd)
-        )),
-    }
-}
-
-/// CLIENT [subcommand]
-///
-/// Minimal stubs for client library handshake.
-fn handle_client(args: &[Bytes]) -> RespValue {
-    if args.is_empty() {
-        return RespValue::err("ERR wrong number of arguments for 'CLIENT' command");
-    }
-
-    let subcmd = args[0].to_ascii_uppercase();
-    match subcmd.as_slice() {
-        b"SETNAME" => RespValue::ok(),
-        b"GETNAME" => RespValue::BulkString(None),
-        b"ID" => RespValue::Integer(0),
-        b"INFO" => RespValue::BulkString(Some(Bytes::from_static(b""))),
-        _ => RespValue::err(format!(
-            "ERR unknown subcommand or wrong number of arguments for 'CLIENT|{}' command",
-            sanitize_for_error(&subcmd)
-        )),
-    }
-}
+// COMMAND and CLIENT stubs replaced by full implementations in
+// commands/server.rs (dispatched via server::handle_command and
+// server::handle_client above).
 
 #[cfg(test)]
 mod tests {

@@ -267,10 +267,11 @@ async fn start_bench_server() -> (
     // Suppress noisy server logs during benchmarks.
     config.log_level = "warn".into();
 
-    let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
+    let (shutdown_tx, _initial_rx) = tokio::sync::broadcast::channel::<()>(1);
+    let server_shutdown_tx = shutdown_tx.clone();
 
     let handle = tokio::spawn(async move {
-        let _ = kvdb::server::listener::run(config, shutdown_rx, Some(listener)).await;
+        let _ = kvdb::server::listener::run(config, server_shutdown_tx, Some(listener)).await;
     });
 
     // Poll until the server accepts connections.
