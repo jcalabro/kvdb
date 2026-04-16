@@ -20,7 +20,7 @@ accept:
 
 # Full CI pipeline — lint, all tests, doc build. Run before pushing.
 ci: lint test accept smoke
-    cargo doc --no-deps
+    RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 
 # Run clippy and format check
 lint:

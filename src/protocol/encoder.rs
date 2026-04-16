@@ -19,7 +19,7 @@ use crate::protocol::types::RespValue;
 ///
 /// Note: RESP3 encoding is lossy for null variants — `BulkString(None)`,
 /// `Array(None)`, and `Null` all encode to `_\r\n`, which parses back as
-/// `Null`. Use [`types::resp3_eq`] for round-trip equality checks.
+/// `Null`. Use `types::resp3_eq` for round-trip equality checks.
 pub fn encode(value: &RespValue, protocol_version: u8) -> BytesMut {
     let mut buf = BytesMut::with_capacity(estimate_size(value));
     encode_into(&mut buf, value, protocol_version);

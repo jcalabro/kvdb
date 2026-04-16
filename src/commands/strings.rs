@@ -214,7 +214,7 @@ fn parse_positive_i64(arg: &Bytes, cmd_name: &str) -> Result<i64, RespValue> {
     Ok(val)
 }
 
-/// SET key value [NX|XX] [GET] [EX s|PX ms|EXAT s|PXAT ms] [KEEPTTL] --
+/// SET key value \[NX|XX\] \[GET\] \[EX s|PX ms|EXAT s|PXAT ms\] \[KEEPTTL\] --
 /// Sets the string value of `key`. Supports conditional set, TTL, and old-value return.
 pub async fn handle_set(args: &[Bytes], state: &ConnectionState) -> RespValue {
     if args.len() < 2 {

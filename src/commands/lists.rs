@@ -386,7 +386,7 @@ async fn handle_push(
 // LPOP key [count]
 // ---------------------------------------------------------------------------
 
-/// LPOP key [count] — Remove and return element(s) from the head.
+/// LPOP key \[count\] — Remove and return element(s) from the head.
 ///
 /// Without `count`: returns the single removed bulk string, or Nil if
 /// the list is empty/missing.
@@ -402,7 +402,7 @@ pub async fn handle_lpop(args: &[Bytes], state: &ConnectionState) -> RespValue {
 // RPOP key [count]
 // ---------------------------------------------------------------------------
 
-/// RPOP key [count] — Remove and return element(s) from the tail.
+/// RPOP key \[count\] — Remove and return element(s) from the tail.
 pub async fn handle_rpop(args: &[Bytes], state: &ConnectionState) -> RespValue {
     handle_pop(args, state, "RPOP", /* from_head = */ false).await
 }

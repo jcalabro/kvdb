@@ -576,15 +576,27 @@ async fn dispatch_one(
 }
 
 /// If the command exceeded the slow-log threshold, record an entry.
-/// Cheap: returns immediately if the threshold is not met.
+///
+/// Fast path: reads one atomic (the threshold) and returns immediately
+/// when the command was fast enough. The expensive work (mutex lock on
+/// the client name, slow-log mutation) only happens for commands that
+/// actually exceeded the threshold.
 fn record_slowlog(state: &ConnectionState, cmd: &RedisCommand, started: std::time::Instant) {
     let elapsed_us = started.elapsed().as_micros() as u64;
-    // Mirror runtime threshold/length changes from CONFIG SET into the slow log.
+
+    // Read the live threshold from CONFIG (single atomic load).
     let live_threshold = state
         .server
         .config
         .slowlog_log_slower_than_us
         .load(std::sync::atomic::Ordering::Relaxed);
+
+    // Fast path: most commands are well below the threshold.
+    if live_threshold < 0 || (elapsed_us as i64) < live_threshold {
+        return;
+    }
+
+    // Slow path: sync CONFIG → SlowLog config, then record the entry.
     state.server.slowlog.set_threshold_us(live_threshold);
     let live_max_len = state
         .server

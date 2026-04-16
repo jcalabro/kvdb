@@ -457,7 +457,7 @@ pub async fn handle_smembers(args: &[Bytes], state: &ConnectionState) -> RespVal
 // SPOP key [count]
 // ---------------------------------------------------------------------------
 
-/// SPOP key [count] — Remove and return random member(s).
+/// SPOP key \[count\] — Remove and return random member(s).
 ///
 /// Without count: returns a single member (BulkString), nil if empty.
 /// With count: returns an array of up to `count` distinct members.
@@ -581,7 +581,7 @@ pub async fn handle_spop(args: &[Bytes], state: &ConnectionState) -> RespValue {
 // SRANDMEMBER key [count]
 // ---------------------------------------------------------------------------
 
-/// SRANDMEMBER key [count] — Return random member(s) without removing.
+/// SRANDMEMBER key \[count\] — Return random member(s) without removing.
 ///
 /// Without count: returns a single member (BulkString), nil if empty.
 /// count > 0: return up to `count` distinct members.

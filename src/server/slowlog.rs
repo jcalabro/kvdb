@@ -27,7 +27,7 @@ use bytes::Bytes;
 /// held during RESP encoding.
 #[derive(Debug, Clone)]
 pub struct SlowLogEntry {
-    /// Monotonic id (never reused). Mirrors Redis ENTRY[0].
+    /// Monotonic id (never reused). Mirrors Redis ENTRY\[0\].
     pub id: u64,
     /// Wall-clock UNIX seconds at which the command finished.
     pub timestamp_secs: u64,

@@ -368,9 +368,10 @@ impl KillFilter {
 /// Parse `CLIENT KILL` arguments. Either old-form `CLIENT KILL addr:port`
 /// or new-form `CLIENT KILL [ID id] [ADDR ip:port] ...`.
 ///
-/// Returns `Ok((filter, is_old_form))` so the caller can format the
-/// response correctly (old form returns +OK, new form returns count).
-pub fn parse_kill_args(args: &[Bytes]) -> Result<(KillFilter, bool), String> {
+/// Returns `Ok((filter, is_old_form, skipme))` so the caller can:
+/// - format the response correctly (old form returns +OK, new form returns count)
+/// - fill in the issuing connection's id when `skipme` is true
+pub fn parse_kill_args(args: &[Bytes]) -> Result<(KillFilter, bool, bool), String> {
     if args.is_empty() {
         return Err("ERR wrong number of arguments for 'CLIENT|KILL' command".into());
     }
@@ -386,6 +387,7 @@ pub fn parse_kill_args(args: &[Bytes]) -> Result<(KillFilter, bool), String> {
                 ..Default::default()
             },
             true,
+            true, // old form always skips self
         ));
     }
 
@@ -430,9 +432,9 @@ pub fn parse_kill_args(args: &[Bytes]) -> Result<(KillFilter, bool), String> {
                         .map_err(|_| "ERR MAXAGE must be a valid integer".to_string())?,
                 );
             }
-            b"SKIPME" => match value.as_ref() {
-                b"yes" | b"YES" | b"Yes" => skipme = true,
-                b"no" | b"NO" | b"No" => skipme = false,
+            b"SKIPME" => match value.to_ascii_lowercase().as_slice() {
+                b"yes" => skipme = true,
+                b"no" => skipme = false,
                 _ => return Err("ERR syntax error: SKIPME must be yes or no".into()),
             },
             b"TYPE" => {
@@ -453,16 +455,7 @@ pub fn parse_kill_args(args: &[Bytes]) -> Result<(KillFilter, bool), String> {
         }
     }
 
-    // The skipme handling is filled in by the caller (it knows the
-    // connection's own id). We carry the parsed flag back via the field.
-    if !skipme {
-        f.skip_id = None;
-    }
-    // If SKIPME was yes (the default), the caller will set f.skip_id to
-    // the issuing connection's id before invoking kill_matching.
-    let _ = skipme;
-
-    Ok((f, false))
+    Ok((f, false, skipme))
 }
 
 /// CLIENT NO-EVICT / NO-TOUCH state. Per-connection toggles.
@@ -609,8 +602,9 @@ mod tests {
     #[test]
     fn parse_kill_old_form() {
         let args = vec![Bytes::from_static(b"127.0.0.1:1234")];
-        let (filter, is_old) = parse_kill_args(&args).unwrap();
+        let (filter, is_old, skipme) = parse_kill_args(&args).unwrap();
         assert!(is_old);
+        assert!(skipme);
         assert_eq!(filter.addr, Some("127.0.0.1:1234".parse().unwrap()));
     }
 
@@ -622,10 +616,27 @@ mod tests {
             Bytes::from_static(b"ADDR"),
             Bytes::from_static(b"10.0.0.1:6379"),
         ];
-        let (filter, is_old) = parse_kill_args(&args).unwrap();
+        let (filter, is_old, skipme) = parse_kill_args(&args).unwrap();
         assert!(!is_old);
+        assert!(skipme); // default
         assert_eq!(filter.id, Some(42));
         assert_eq!(filter.addr, Some("10.0.0.1:6379".parse().unwrap()));
+    }
+
+    #[test]
+    fn parse_kill_skipme_no() {
+        let args = vec![Bytes::from_static(b"SKIPME"), Bytes::from_static(b"no")];
+        let (_filter, is_old, skipme) = parse_kill_args(&args).unwrap();
+        assert!(!is_old);
+        assert!(!skipme, "SKIPME no should set skipme=false");
+    }
+
+    #[test]
+    fn parse_kill_skipme_case_insensitive() {
+        // Mixed-case "yEs" should parse as yes.
+        let args = vec![Bytes::from_static(b"SKIPME"), Bytes::from_static(b"yEs")];
+        let (_filter, _is_old, skipme) = parse_kill_args(&args).unwrap();
+        assert!(skipme, "mixed-case 'yEs' should parse as yes");
     }
 
     #[test]

@@ -924,7 +924,7 @@ pub async fn handle_hstrlen(args: &[Bytes], state: &ConnectionState) -> RespValu
 // HRANDFIELD key [count [WITHVALUES]]
 // ---------------------------------------------------------------------------
 
-/// HRANDFIELD key [count [WITHVALUES]] — Return random field(s).
+/// HRANDFIELD key \[count \[WITHVALUES\]\] — Return random field(s).
 ///
 /// - No count arg: return single field name (BulkString), nil if key doesn't exist.
 /// - count > 0: return up to `count` distinct fields.

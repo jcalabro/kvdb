@@ -50,10 +50,40 @@ use super::registry;
 // ---------------------------------------------------------------------------
 
 fn now_unix_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    helpers::now_ms()
+}
+
+/// Paginated scan of all key-value pairs in a FDB range.
+///
+/// `get_range` with `StreamingMode::Iterator` returns results in
+/// increasing batches. A single call with `iteration=1` only returns
+/// the first page — typically a few hundred bytes. This helper loops
+/// until all pages are consumed, matching the pagination pattern used
+/// by hash/set/list/zset readers.
+async fn scan_range_all(
+    tr: &foundationdb::Transaction,
+    begin: &[u8],
+    end: &[u8],
+) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
+    let mut results = Vec::new();
+    let mut maybe_range: Option<RangeOption<'_>> = Some(RangeOption::from((begin, end)));
+    let mut iteration = 1;
+
+    while let Some(range_opt) = maybe_range.take() {
+        let kvs = tr
+            .get_range(&range_opt, iteration, true)
+            .await
+            .map_err(|e| CommandError::Generic(e.to_string()))?;
+
+        for kv in kvs.iter() {
+            results.push((kv.key().to_vec(), kv.value().to_vec()));
+        }
+
+        maybe_range = range_opt.next_range(&kvs);
+        iteration += 1;
+    }
+
+    Ok(results)
 }
 
 fn arity_err(name: &str) -> RespValue {
@@ -127,7 +157,16 @@ pub async fn handle_wait(args: &[Bytes]) -> RespValue {
 // ---------------------------------------------------------------------------
 
 /// `BGSAVE [SCHEDULE]`
-pub async fn handle_bgsave(_args: &[Bytes]) -> RespValue {
+pub async fn handle_bgsave(args: &[Bytes]) -> RespValue {
+    // Accept the optional SCHEDULE flag; reject anything else.
+    for arg in args {
+        if arg.to_ascii_uppercase().as_slice() != b"SCHEDULE" {
+            return RespValue::err(format!(
+                "ERR unknown subcommand or wrong number of arguments for 'BGSAVE|{}' command",
+                String::from_utf8_lossy(arg)
+            ));
+        }
+    }
     RespValue::SimpleString(Bytes::from_static(b"Background saving started"))
 }
 
@@ -214,27 +253,21 @@ pub async fn handle_randomkey(args: &[Bytes], state: &ConnectionState) -> RespVa
         async move {
             let now = helpers::now_ms();
             let (begin, end) = dirs.meta.range();
-            let range_opt = RangeOption::from((begin.as_slice(), end.as_slice()));
-            // Single scan: collect all live keys. Bounded by FDB
+            // Paginated scan: collect all live keys. Bounded by FDB
             // transaction size (10MB) which caps namespace cardinality
             // here at roughly 100k keys for typical key sizes — that's
             // fine for an admin command.
-            let kvs = tr
-                .get_range(&range_opt, 1, true)
-                .await
-                .map_err(|e| helpers::cmd_err(CommandError::Generic(e.to_string())))?;
+            let all = scan_range_all(&tr, &begin, &end).await.map_err(helpers::cmd_err)?;
 
             let mut live: Vec<Vec<u8>> = Vec::new();
-            for kv in kvs.iter() {
-                let Ok(meta) = ObjectMeta::deserialize(kv.value()) else {
+            for (key_bytes, value_bytes) in &all {
+                let Ok(meta) = ObjectMeta::deserialize(value_bytes) else {
                     continue;
                 };
                 if meta.is_expired(now) {
                     continue;
                 }
-                // Reverse the directory pack: meta_key = pack(key,)
-                // → we strip the directory prefix and tuple-decode.
-                if let Ok((key,)) = dirs.meta.unpack::<(Vec<u8>,)>(kv.key()) {
+                if let Ok((key,)) = dirs.meta.unpack::<(Vec<u8>,)>(key_bytes) {
                     live.push(key);
                 }
             }
@@ -276,21 +309,17 @@ pub async fn handle_keys(args: &[Bytes], state: &ConnectionState) -> RespValue {
         async move {
             let now = helpers::now_ms();
             let (begin, end) = dirs.meta.range();
-            let range_opt = RangeOption::from((begin.as_slice(), end.as_slice()));
-            let kvs = tr
-                .get_range(&range_opt, 1, true)
-                .await
-                .map_err(|e| helpers::cmd_err(CommandError::Generic(e.to_string())))?;
+            let all = scan_range_all(&tr, &begin, &end).await.map_err(helpers::cmd_err)?;
 
             let mut out = Vec::new();
-            for kv in kvs.iter() {
-                let Ok(meta) = ObjectMeta::deserialize(kv.value()) else {
+            for (key_bytes, value_bytes) in &all {
+                let Ok(meta) = ObjectMeta::deserialize(value_bytes) else {
                     continue;
                 };
                 if meta.is_expired(now) {
                     continue;
                 }
-                if let Ok((key,)) = dirs.meta.unpack::<(Vec<u8>,)>(kv.key())
+                if let Ok((key,)) = dirs.meta.unpack::<(Vec<u8>,)>(key_bytes)
                     && matcher.matches(&key)
                 {
                     out.push(RespValue::BulkString(Some(Bytes::from(key))));
@@ -320,7 +349,7 @@ pub async fn handle_config(args: &[Bytes], state: &ConnectionState) -> RespValue
     match sub.as_slice() {
         b"GET" => config_get(rest, state),
         b"SET" => config_set(rest, state),
-        b"RESETSTAT" => config_resetstat(rest),
+        b"RESETSTAT" => config_resetstat(rest, state),
         b"REWRITE" => config_rewrite(rest),
         b"HELP" => config_help(),
         other => RespValue::err(format!(
@@ -371,15 +400,14 @@ fn config_set(args: &[Bytes], state: &ConnectionState) -> RespValue {
     RespValue::ok()
 }
 
-fn config_resetstat(args: &[Bytes]) -> RespValue {
+fn config_resetstat(args: &[Bytes], state: &ConnectionState) -> RespValue {
     if !args.is_empty() {
         return arity_err("CONFIG|RESETSTAT");
     }
-    // We can't atomically reset Prometheus counters (the crate doesn't
-    // expose that), but we can clear the slow log — that's the
-    // operator-visible counter Redis users expect to "reset stats" on.
-    // Counters in the metrics endpoint continue to increase
-    // monotonically (correct Prometheus convention).
+    // Prometheus counters are monotonic by convention and can't be reset.
+    // We clear the slow log — that's the operator-visible state Redis
+    // users expect CONFIG RESETSTAT to affect.
+    state.server.slowlog.reset();
     RespValue::ok()
 }
 
@@ -437,7 +465,8 @@ pub async fn handle_client(args: &[Bytes], state: &mut ConnectionState) -> RespV
         b"NO-EVICT" => client_toggle_no_evict(rest, state),
         b"NO-TOUCH" => client_toggle_no_touch(rest, state),
         b"REPLY" => client_reply(rest, state),
-        b"PAUSE" | b"UNPAUSE" => client_pause(rest),
+        b"PAUSE" => client_pause(rest, true),
+        b"UNPAUSE" => client_pause(rest, false),
         b"HELP" => client_help(),
         other => RespValue::err(format!(
             "ERR Unknown CLIENT subcommand or wrong number of arguments for '{}'",
@@ -534,12 +563,12 @@ fn client_list(args: &[Bytes], state: &ConnectionState) -> RespValue {
 }
 
 fn client_kill(args: &[Bytes], state: &ConnectionState) -> RespValue {
-    let (mut filter, is_old) = match crate::server::clients::parse_kill_args(args) {
+    let (mut filter, is_old, skipme) = match crate::server::clients::parse_kill_args(args) {
         Ok(p) => p,
         Err(msg) => return RespValue::err(msg),
     };
-    // Default SKIPME=yes excludes the issuing connection.
-    if filter.skip_id.is_none() {
+    // When SKIPME=yes (the default), exclude the issuing connection.
+    if skipme {
         filter.skip_id = Some(state.connection_id);
     }
     let now = now_unix_ms();
@@ -595,7 +624,21 @@ fn client_reply(args: &[Bytes], state: &mut ConnectionState) -> RespValue {
     RespValue::ok()
 }
 
-fn client_pause(_args: &[Bytes]) -> RespValue {
+fn client_pause(args: &[Bytes], is_pause: bool) -> RespValue {
+    if is_pause {
+        // CLIENT PAUSE <timeout> [WRITE|ALL]
+        if args.is_empty() {
+            return arity_err("CLIENT|PAUSE");
+        }
+        // Validate the timeout is a non-negative integer (required by Redis).
+        let ok = std::str::from_utf8(&args[0])
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .is_some();
+        if !ok {
+            return RespValue::err("ERR timeout is not a valid integer or out of range");
+        }
+    }
     // We don't support pausing connections (it would block all writes
     // for a duration). Return OK so clients that probe for this don't
     // error out, but document the no-op nature in INFO if needed.
@@ -1533,14 +1576,10 @@ async fn count_keys(state: &ConnectionState, dirs: &crate::storage::Directories)
         async move {
             let now = helpers::now_ms();
             let (begin, end) = dirs.meta.range();
-            let range_opt = RangeOption::from((begin.as_slice(), end.as_slice()));
-            let kvs = tr
-                .get_range(&range_opt, 1, true)
-                .await
-                .map_err(|e| helpers::cmd_err(CommandError::Generic(e.to_string())))?;
+            let all = scan_range_all(&tr, &begin, &end).await.map_err(helpers::cmd_err)?;
             let mut count: i64 = 0;
-            for kv in kvs.iter() {
-                if let Ok(meta) = ObjectMeta::deserialize(kv.value())
+            for (_key_bytes, value_bytes) in &all {
+                if let Ok(meta) = ObjectMeta::deserialize(value_bytes)
                     && !meta.is_expired(now)
                 {
                     count += 1;

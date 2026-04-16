@@ -556,19 +556,26 @@ pub async fn handle_dbsize(args: &[Bytes], state: &ConnectionState) -> RespValue
         async move {
             let now = helpers::now_ms();
             let (begin, end) = dirs.meta.range();
-            let range_opt = RangeOption::from((begin.as_slice(), end.as_slice()));
-            let kvs = tr
-                .get_range(&range_opt, 1, true)
-                .await
-                .map_err(|e| helpers::cmd_err(CommandError::Generic(e.to_string())))?;
-
+            let mut maybe_range: Option<RangeOption<'_>> = Some(RangeOption::from((begin.as_slice(), end.as_slice())));
+            let mut iteration = 1;
             let mut count: i64 = 0;
-            for kv in kvs.iter() {
-                if let Ok(meta) = ObjectMeta::deserialize(kv.value())
-                    && !meta.is_expired(now)
-                {
-                    count += 1;
+
+            while let Some(range_opt) = maybe_range.take() {
+                let kvs = tr
+                    .get_range(&range_opt, iteration, true)
+                    .await
+                    .map_err(|e| helpers::cmd_err(CommandError::Generic(e.to_string())))?;
+
+                for kv in kvs.iter() {
+                    if let Ok(meta) = ObjectMeta::deserialize(kv.value())
+                        && !meta.is_expired(now)
+                    {
+                        count += 1;
+                    }
                 }
+
+                maybe_range = range_opt.next_range(&kvs);
+                iteration += 1;
             }
             Ok(count)
         }
@@ -781,7 +788,7 @@ pub async fn handle_select(args: &[Bytes], state: &mut ConnectionState) -> RespV
 // FLUSHDB [ASYNC]
 // ---------------------------------------------------------------------------
 
-/// FLUSHDB [ASYNC] -- Delete all keys in the currently selected database.
+/// FLUSHDB \[ASYNC\] -- Delete all keys in the currently selected database.
 ///
 /// The ASYNC flag is accepted but ignored (all flushes are synchronous).
 /// Returns OK on success.
@@ -809,7 +816,7 @@ pub async fn handle_flushdb(args: &[Bytes], state: &ConnectionState) -> RespValu
 // FLUSHALL [ASYNC]
 // ---------------------------------------------------------------------------
 
-/// FLUSHALL [ASYNC] -- Delete all keys in all cached databases.
+/// FLUSHALL \[ASYNC\] -- Delete all keys in all cached databases.
 ///
 /// The ASYNC flag is accepted but ignored (all flushes are synchronous).
 /// Returns OK on success.

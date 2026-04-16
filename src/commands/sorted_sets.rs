@@ -496,7 +496,7 @@ fn parse_zadd_flags(args: &[Bytes]) -> Result<(ZaddFlags, usize), CommandError> 
     Ok((flags, i))
 }
 
-/// ZADD key [NX|XX] [GT|LT] [CH] score member [score member ...]
+/// ZADD key \[NX|XX\] \[GT|LT\] \[CH\] score member \[score member ...\]
 ///
 /// Add or update members in a sorted set. Returns the number of members
 /// added (or added+updated with CH flag).
@@ -917,12 +917,12 @@ async fn handle_range_by_rank(
     }
 }
 
-/// ZRANGE key start stop [WITHSCORES] — Return members in ascending rank order.
+/// ZRANGE key start stop \[WITHSCORES\] — Return members in ascending rank order.
 pub async fn handle_zrange(args: &[Bytes], state: &ConnectionState) -> RespValue {
     handle_range_by_rank(args, state, "ZRANGE", false).await
 }
 
-/// ZREVRANGE key start stop [WITHSCORES] — Return members in descending rank order.
+/// ZREVRANGE key start stop \[WITHSCORES\] — Return members in descending rank order.
 pub async fn handle_zrevrange(args: &[Bytes], state: &ConnectionState) -> RespValue {
     handle_range_by_rank(args, state, "ZREVRANGE", true).await
 }
@@ -1111,7 +1111,7 @@ fn parse_limit_only(args: &[Bytes], start_idx: usize) -> Result<(usize, usize), 
     Ok((offset, count))
 }
 
-/// ZRANGEBYSCORE key min max [WITHSCORES] [LIMIT offset count]
+/// ZRANGEBYSCORE key min max \[WITHSCORES\] \[LIMIT offset count\]
 ///
 /// Return members with scores in [min, max] range. min/max use score
 /// bound syntax: `-inf`, `+inf`, `(exclusive`, `inclusive`.
@@ -1520,12 +1520,12 @@ async fn handle_zpop_impl(args: &[Bytes], state: &ConnectionState, cmd_name: &'s
     }
 }
 
-/// ZPOPMIN key [count] — Pop members with the lowest scores.
+/// ZPOPMIN key \[count\] — Pop members with the lowest scores.
 pub async fn handle_zpopmin(args: &[Bytes], state: &ConnectionState) -> RespValue {
     handle_zpop_impl(args, state, "ZPOPMIN", true).await
 }
 
-/// ZPOPMAX key [count] — Pop members with the highest scores.
+/// ZPOPMAX key \[count\] — Pop members with the highest scores.
 pub async fn handle_zpopmax(args: &[Bytes], state: &ConnectionState) -> RespValue {
     handle_zpop_impl(args, state, "ZPOPMAX", false).await
 }
@@ -1534,7 +1534,7 @@ pub async fn handle_zpopmax(args: &[Bytes], state: &ConnectionState) -> RespValu
 // ZRANDMEMBER key [count [WITHSCORES]]
 // ---------------------------------------------------------------------------
 
-/// ZRANDMEMBER key [count [WITHSCORES]]
+/// ZRANDMEMBER key \[count \[WITHSCORES\]\]
 ///
 /// Return random members without removing them.
 /// - No count: return one random member as BulkString, Nil if empty.
